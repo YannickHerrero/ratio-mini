@@ -8,6 +8,8 @@ Double-cliquer sur **`ratio-mini-gui.exe`**. Aucune installation ni commande n'e
 
 Depuis la version 0.5.2, l'affichage utilise Direct3D 12 via wgpu, sans OpenGL. Ce changement contourne le pilote Intel OpenGL impliqué dans un crash constaté sous Windows. En cas de problème graphique, lancer `ratio-mini-gui.exe --software-renderer` pour utiliser le rendu logiciel Microsoft (WARP), si disponible. Ce mode peut consommer davantage de CPU. Il ne garantit pas l'absence de tout plantage ; la liste restaurée reste inactive jusqu'au démarrage manuel des sessions.
 
+Le fichier local `ratio-mini-diagnostic.log`, à côté de l'exécutable, conserve la version, le moteur graphique sélectionné et les sorties normales ou erreurs de démarrage. Il consigne aussi l'emplacement d'une panique Rust, sans son contenu, les chemins des torrents ni les URL réseau. Sa taille reste limitée à environ 64 Kio. Un crash natif du pilote ne passe pas par ce journal : sa cause reste à rechercher dans les événements Windows.
+
 1. Dans le panneau de gauche, cliquer sur **Choisir un fichier .torrent…**.
 2. Régler la vitesse moyenne, le volume maximal, les variations et la durée du démarrage progressif.
 3. Cliquer sur **Ajouter et démarrer** : les annonces réseau commencent et la session apparaît à droite.

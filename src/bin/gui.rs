@@ -1,5 +1,8 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+#[path = "gui/diagnostics.rs"]
+mod diagnostics;
+
 use eframe::egui::{self, Color32, RichText};
 use ratio_mini::{
     Args, Event, TorrentMetadata, inspect_details, run_session,
@@ -756,7 +759,13 @@ impl Drop for App {
 }
 
 fn main() -> eframe::Result {
+    diagnostics::install();
     let software = std::env::args().any(|arg| arg == "--software-renderer");
+    diagnostics::event(if software {
+        "Startup: Direct3D 12 software requested"
+    } else {
+        "Startup: Direct3D 12 hardware requested"
+    });
     let mut graphics = eframe::egui_wgpu::WgpuSetupCreateNew::default();
     // Keep OpenGL disabled even if WGPU_BACKEND is set in the environment.
     graphics.instance_descriptor.backends = wgpu::Backends::DX12;
@@ -784,10 +793,17 @@ fn main() -> eframe::Result {
             .with_min_inner_size([900.0, 600.0]),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Ratio Mini",
         options,
         Box::new(move |cc| {
+            if let Some(state) = &cc.wgpu_render_state {
+                let info = state.adapter.get_info();
+                diagnostics::event(&format!(
+                    "Renderer ready: {:?}, {:?}, {}",
+                    info.backend, info.device_type, info.name
+                ));
+            }
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let mut style = (*cc.egui_ctx.style()).clone();
             style.spacing.item_spacing = egui::vec2(9.0, 8.0);
@@ -799,7 +815,13 @@ fn main() -> eframe::Result {
             };
             Ok(Box::new(app))
         }),
-    )
+    );
+    diagnostics::event(if result.is_ok() {
+        "Normal exit"
+    } else {
+        "Window or renderer initialization failed"
+    });
+    result
 }
 
 #[cfg(test)]
