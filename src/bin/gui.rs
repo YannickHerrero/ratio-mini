@@ -534,7 +534,7 @@ impl eframe::App for App {
         }
         egui::TopBottomPanel::top("header").exact_height(if self.closing { 120.0 } else { 90.0 }).show(ctx, |ui| {
             ui.add_space(12.0);
-            ui.horizontal(|ui| { ui.heading(RichText::new("Ratio Mini").size(27.0)); ui.label("0.2"); });
+            ui.horizontal(|ui| { ui.heading(RichText::new("Ratio Mini").size(27.0)); ui.label(env!("CARGO_PKG_VERSION")); });
             ui.label("Upload simulé — aucun transfert des fichiers du torrent.");
             if self.closing { ui.colored_label(Color32::YELLOW, "Arrêt des sessions avant fermeture… Une requête peut prendre jusqu’à 20 secondes."); }
             ui.add_space(12.0);

@@ -584,10 +584,10 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
     let client = Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(20))
-        .user_agent("ratio-mini/0.1.0")
+        .user_agent(concat!("ratio-mini/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|_| "Initialisation HTTP impossible")?;
-    let mut peer = *b"-RM0001-000000000000";
+    let mut peer = *b"-RM0003-000000000000";
     rand::thread_rng().fill_bytes(&mut peer[8..]);
     let start_url = announce_url(&t, &peer, args.port, 0, Some("started"), None);
     let Some(mut reply) = retry_request(
