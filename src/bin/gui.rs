@@ -491,7 +491,7 @@ impl App {
                         ui.label(format!("{:.0} Kio/s actuellement  ·  moyenne visée {} Kio/s  ·  variation ±{} %", session.speed, session.settings.rate_kib, session.settings.variation_percent));
                         ui.weak(format!("Dernière déclaration acceptée : {:.1} Mio", session.announced as f64 / 1_048_576.0));
                         let count = |value: Option<u64>| value.map_or_else(|| "?".into(), |n| n.to_string());
-                        ui.weak(format!("Seeders : {}  ·  Leechers : {}", count(session.seeders), count(session.leechers)));
+                        ui.weak(format!("Derniers chiffres — seeders : {}  ·  leechers : {}", count(session.seeders), count(session.leechers)));
                         ui.horizontal(|ui| {
                             if session.running {
                                 if ui.add_enabled(!session.stop.load(Ordering::SeqCst), egui::Button::new("Arrêter")).clicked() { session.request_stop(); }

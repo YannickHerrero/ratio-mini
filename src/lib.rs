@@ -292,6 +292,12 @@ struct Reply {
     seeders: Option<u64>,
     leechers: Option<u64>,
 }
+impl Reply {
+    fn keep_known_statistics(&mut self, previous: &Self) {
+        self.seeders = self.seeders.or(previous.seeders);
+        self.leechers = self.leechers.or(previous.leechers);
+    }
+}
 #[derive(Debug)]
 enum AnnounceError {
     Temporary {
@@ -646,7 +652,7 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
             if done { Some("stopped") } else { None },
             reply.tracker_id.as_deref(),
         );
-        let next = if done {
+        let mut next = if done {
             announce(&client, url).map_err(|error| error.message().to_owned())?
         } else {
             match retry_request(
@@ -689,6 +695,7 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         }
         // Count time spent in the request under the previous state before applying new statistics.
         traffic.advance_paused(start.elapsed(), paused);
+        next.keep_known_statistics(&reply);
         let next_paused = !args.ignore_swarm && next.leechers == Some(0);
         if next_paused != paused {
             report!(
@@ -819,6 +826,12 @@ mod tests {
         let empty =
             parse_reply(b"d8:completei12e10:incompletei0e8:intervali60e5:peers0:e").unwrap();
         assert_eq!((empty.seeders, empty.leechers), (Some(12), Some(0)));
+        let mut missing = parse_reply(b"d8:intervali60e5:peers0:e").unwrap();
+        missing.keep_known_statistics(&empty);
+        assert_eq!(missing.leechers, Some(0));
+        let mut positive = parse_reply(b"d10:incompletei2e8:intervali60e5:peers0:e").unwrap();
+        positive.keep_known_statistics(&missing);
+        assert_eq!((positive.seeders, positive.leechers), (Some(12), Some(2)));
     }
 
     #[test]
