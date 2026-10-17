@@ -188,19 +188,20 @@ struct App {
 
 impl Default for App {
     fn default() -> Self {
+        let defaults = FormSettings::default();
         Self {
             file: None,
             file_details: None,
-            rate: 128,
-            target: 1024,
-            percentage_mode: true,
-            upload_percent: 300,
-            variation: 25,
-            ramp: 30,
-            pause_without_leechers: true,
-            client_profile: ratio_mini::profiles::ClientProfile::Native,
-            handshake: true,
-            port: 6881,
+            rate: defaults.rate,
+            target: defaults.target,
+            percentage_mode: defaults.upload_percent.is_some(),
+            upload_percent: defaults.upload_percent.unwrap_or(300),
+            variation: defaults.variation,
+            ramp: defaults.ramp,
+            pause_without_leechers: defaults.pause_without_leechers,
+            client_profile: defaults.client_profile,
+            handshake: defaults.handshake,
+            port: defaults.port,
             sessions: Vec::new(),
             error: None,
             closing: false,
@@ -212,6 +213,19 @@ impl Default for App {
 }
 
 impl App {
+    fn reset_form(&mut self) {
+        let defaults = FormSettings::default();
+        self.rate = defaults.rate;
+        self.target = defaults.target;
+        self.percentage_mode = defaults.upload_percent.is_some();
+        self.upload_percent = defaults.upload_percent.unwrap_or(300);
+        self.variation = defaults.variation;
+        self.ramp = defaults.ramp;
+        self.pause_without_leechers = defaults.pause_without_leechers;
+        self.client_profile = defaults.client_profile;
+        self.handshake = defaults.handshake;
+        self.port = defaults.port;
+    }
     fn add(&mut self) {
         let Some(file) = self.file.clone() else {
             return;
@@ -385,6 +399,15 @@ impl App {
 
     fn form(&mut self, ui: &mut egui::Ui) {
         ui.heading("Ajouter un torrent");
+        if ui
+            .small_button("Valeurs par défaut")
+            .on_hover_text(
+                "Rétablir les réglages d'ajout ; les sessions existantes gardent leurs réglages.",
+            )
+            .clicked()
+        {
+            self.reset_form();
+        }
         ui.add_space(8.0);
         ui.label("Choisis un fichier, puis les réglages de sa session.");
         ui.add_space(14.0);
@@ -748,6 +771,32 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reset_changes_new_session_defaults_without_touching_existing_sessions_or_selection() {
+        let mut app = App::default();
+        let (session, _tx) = fake_session("existing.torrent");
+        let settings = session.settings.clone();
+        app.sessions.push(session);
+        app.file = Some("selected.torrent".into());
+        app.rate = 999;
+        app.percentage_mode = false;
+        app.upload_percent = 10;
+        app.reset_form();
+        let new_settings = app.settings_for(app.file.clone().unwrap());
+        assert_eq!(new_settings.upload_mib, None);
+        assert_eq!(new_settings.upload_percent, Some(300));
+        assert_eq!(new_settings.rate_kib, 128);
+        assert_eq!(
+            new_settings.client_profile,
+            ratio_mini::profiles::ClientProfile::Qbittorrent524
+        );
+        assert!(new_settings.handshake && !new_settings.ignore_swarm);
+        assert_eq!(app.sessions[0].settings, settings);
+        assert_eq!(
+            app.file.as_deref(),
+            Some(std::path::Path::new("selected.torrent"))
+        );
+    }
     #[test]
     fn restored_list_never_starts_sessions_or_reads_torrent_paths() {
         let directory = tempfile::tempdir().unwrap();

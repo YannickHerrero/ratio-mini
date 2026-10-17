@@ -101,7 +101,7 @@ pub fn encode(bytes: &[u8], upper: bool, unreserved: &str) -> String {
 impl Identity {
     pub fn new(profile: ClientProfile) -> Self {
         let mut rng = rand::thread_rng();
-        let mut peer = *b"-RM0004-000000000000";
+        let mut peer = *b"-RM0005-000000000000";
         let key;
         if let Some(spec) = profile.spec() {
             peer[..8].copy_from_slice(spec.peer_id.prefix.as_bytes());

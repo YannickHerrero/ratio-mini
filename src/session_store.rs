@@ -24,6 +24,22 @@ pub struct FormSettings {
     pub port: u16,
 }
 
+impl Default for FormSettings {
+    fn default() -> Self {
+        Self {
+            rate: 128,
+            target: 1024,
+            upload_percent: Some(300),
+            variation: 25,
+            ramp: 30,
+            pause_without_leechers: true,
+            client_profile: crate::profiles::ClientProfile::Qbittorrent524,
+            handshake: true,
+            port: 6881,
+        }
+    }
+}
+
 fn default_port() -> u16 {
     6881
 }
