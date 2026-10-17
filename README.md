@@ -11,6 +11,8 @@ Double-cliquer sur **`ratio-mini-gui.exe`**. Aucune installation ni commande n'e
 3. Cliquer sur **Ajouter et démarrer** : les annonces réseau commencent et la session apparaît à droite.
 4. Recommencer pour ajouter d'autres torrents. Chaque session fonctionne en parallèle avec ses propres réglages ; les vitesses s'additionnent.
 
+Le **Plafond d'upload** peut être défini en **Pourcentage du torrent** ou en **Volume fixe**. Le premier mode est proposé pour les nouveaux ajouts, à **300 %**, soit trois fois la taille totale du contenu : un torrent de 4 Gio donne un plafond de 12 Gio. Il ne s'agit pas de la taille du petit fichier `.torrent`, ni d'un ratio de compte calculé par le programme. Pour un torrent multifichier, toutes les longueurs sont additionnées. L'interface affiche la taille et le plafond après sélection, puis le plafond effectif dans la liste. Les anciennes sauvegardes conservent leurs plafonds fixes.
+
 Le menu **Profil du client** propose Ratio Mini, qBittorrent 5.2.4 / 5.2.3 / 5.1.4 / 4.6.7 et Transmission 2.94 / 3.00. Le profil choisi est conservé avec chaque torrent. Les anciennes sauvegardes utilisent Ratio Mini. Les six profils repris du dépôt RatioMaster.NET déterminent l'identifiant, la clé de session, l'encodage de la query string et les en-têtes HTTP dans leur ordre exact. Les identifiants restent stables pendant une session. Ces profils utilisent une connexion directe : ils ne reprennent pas la configuration proxy de reqwest. Ils ne reproduisent pas l'empreinte TLS, le système d'exploitation ni le comportement complet d'un client réel.
 
 La case **Répondre au handshake TCP** active un répondeur entrant IPv4 sur le **Port partagé** choisi. Elle est cochée par défaut pour une nouvelle configuration ; les anciennes sauvegardes la conservent désactivée. Plusieurs torrents du même processus partagent ce port : le hash exact du torrent sélectionne l'identité à renvoyer. Le peer ID est identique à celui des annonces HTTP du profil choisi. L'interface affiche le port et le nombre de réponses. Le dernier arrêt libère l'écoute ; un port déjà occupé par une autre application fait échouer la session avant sa première annonce.
@@ -34,19 +36,20 @@ La liste et les réglages sont sauvegardés automatiquement dans `ratio-mini-ses
 Ouvrir PowerShell dans ce dossier. Vérifier les paramètres sans envoyer de requête :
 
 ```powershell
-.\ratio-mini.exe "C:\chemin\fichier.torrent" --rate-kib 512 --variation-percent 25 --upload-mib 1024
+.\ratio-mini.exe "C:\chemin\fichier.torrent" --rate-kib 128 --variation-percent 25 --upload-percent 300
 ```
 
 Démarrer les annonces :
 
 ```powershell
-.\ratio-mini.exe "C:\chemin\fichier.torrent" --rate-kib 512 --variation-percent 25 --upload-mib 1024 --send
+.\ratio-mini.exe "C:\chemin\fichier.torrent" --rate-kib 128 --variation-percent 25 --upload-percent 300 --send
 ```
 
 - `--rate-kib` : vitesse moyenne visée en Kio/s, 128 par défaut.
 - `--variation-percent` : amplitude aléatoire, 25 % par défaut. À 512 Kio/s et 25 %, le débit simulé varie entre 384 et 640 Kio/s. `0` donne un débit constant ; maximum : `100`.
 - `--ramp-seconds` : démarrage progressif de zéro au débit simulé sur 30 secondes par défaut. `0` désactive cette montée ; maximum : 3600.
-- `--upload-mib` : plafond pour cette session en Mio, 1024 par défaut.
+- `--upload-percent` : plafond en pourcentage de la taille du contenu, 300 % par défaut en l'absence de plafond fixe. 100 % = une fois la taille ; 300 % = trois fois. Valeurs entières de 1 à 100 000.
+- `--upload-mib` : autre mode de plafond, fixe en Mio. Les deux options s'excluent mutuellement.
 - `--port` : port déclaré et port d'écoute si le handshake est activé, 6881 par défaut.
 - `--handshake` : active le répondeur TCP IPv4 ; désactivé par défaut en ligne de commande.
 - `--send` : active les requêtes réseau. Sans cette option, seul un aperçu local est affiché.
@@ -64,6 +67,8 @@ Démarrer les annonces :
 Une cible de débit est tirée uniformément autour de la valeur choisie environ toutes les 5 secondes. Le débit est lissé en conservant 75 % du débit précédent et en ajoutant 25 % de la nouvelle cible. Au départ, une rampe linéaire limite progressivement le débit. Le volume est intégré au fil du temps ; la moyenne réelle sur une session peut différer de la valeur visée, surtout pour une session courte. Pendant une requête réseau, le dernier débit reste en vigueur et la rampe continue.
 
 Les compteurs sont transmis à chaque annonce, pas à chaque seconde. L'intervalle demandé par le tracker est respecté, avec un minimum de 30 secondes. À 128 Kio/s en moyenne, atteindre 1024 Mio prend environ 2 h 17 min, puis le programme attend la prochaine annonce pour transmettre le total final. Ctrl+C peut arrêter plus tôt.
+
+Le plafond proportionnel est recalculé à chaque démarrage d'une session à partir de son torrent. Le calcul utilise des entiers, arrondit au prochain octet si nécessaire et refuse les débordements ou un plafond nul. Le plafond reste un maximum : un arrêt manuel ou une pause peut produire un volume inférieur.
 
 ## Fonctionnement et limites
 

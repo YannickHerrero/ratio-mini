@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Color32, RichText};
 use ratio_mini::{
-    Args, Event, inspect, run_session,
+    Args, Event, TorrentMetadata, inspect_details, run_session,
     session_store::{self, Document, FormSettings},
 };
 use std::{
@@ -40,6 +40,8 @@ struct Session {
     leechers: Option<u64>,
     listener_port: Option<u16>,
     handshakes: u64,
+    target_bytes: Option<u64>,
+    torrent_size: Option<u64>,
 }
 
 impl Session {
@@ -68,6 +70,8 @@ impl Session {
             leechers: None,
             listener_port: None,
             handshakes: 0,
+            target_bytes: None,
+            torrent_size: None,
         }
     }
     fn request_stop(&mut self) {
@@ -80,6 +84,13 @@ impl Session {
     fn poll(&mut self) {
         while self.running {
             match self.receiver.try_recv() {
+                Ok(Message::Update(Event::Metadata {
+                    torrent_size,
+                    target_bytes,
+                })) => {
+                    self.torrent_size = Some(torrent_size);
+                    self.target_bytes = Some(target_bytes);
+                }
                 Ok(Message::Update(Event::Listener { port, answered })) => {
                     self.listener_port = Some(port);
                     self.handshakes = answered;
@@ -156,8 +167,11 @@ impl Session {
 
 struct App {
     file: Option<PathBuf>,
+    file_details: Option<TorrentMetadata>,
     rate: u64,
     target: u64,
+    percentage_mode: bool,
+    upload_percent: u32,
     variation: u8,
     ramp: u16,
     pause_without_leechers: bool,
@@ -176,8 +190,11 @@ impl Default for App {
     fn default() -> Self {
         Self {
             file: None,
+            file_details: None,
             rate: 128,
             target: 1024,
+            percentage_mode: true,
+            upload_percent: 300,
             variation: 25,
             ramp: 30,
             pause_without_leechers: true,
@@ -199,9 +216,20 @@ impl App {
         let Some(file) = self.file.clone() else {
             return;
         };
-        let settings = Args {
-            torrent: file.clone(),
-            upload_mib: self.target.clamp(1, 1_000_000),
+        let settings = self.settings_for(file);
+        if self.launch(settings, None) {
+            self.file = None;
+            self.file_details = None;
+        }
+    }
+
+    fn settings_for(&self, file: PathBuf) -> Args {
+        Args {
+            torrent: file,
+            upload_mib: (!self.percentage_mode).then_some(self.target.clamp(1, 1_000_000)),
+            upload_percent: self
+                .percentage_mode
+                .then_some(self.upload_percent.clamp(1, 100_000)),
             rate_kib: self.rate.clamp(1, 1_000_000),
             variation_percent: self.variation.min(100),
             ramp_seconds: self.ramp.min(3600),
@@ -210,9 +238,6 @@ impl App {
             ignore_swarm: !self.pause_without_leechers,
             client_profile: self.client_profile,
             handshake: self.handshake,
-        };
-        if self.launch(settings, None) {
-            self.file = None;
         }
     }
 
@@ -222,13 +247,21 @@ impl App {
             self.error = Some("La liste est limitée à 256 torrents.".into());
             return false;
         }
-        let id = match inspect(&settings.torrent) {
-            Ok(id) => id,
+        let details = match inspect_details(&settings.torrent) {
+            Ok(details) => details,
             Err(error) => {
                 self.error = Some(error);
                 return false;
             }
         };
+        let target_bytes = match settings.target_bytes(details.size) {
+            Ok(target) => target,
+            Err(error) => {
+                self.error = Some(error);
+                return false;
+            }
+        };
+        let id = details.id;
         if self.sessions.iter().any(|s| s.id == id && s.running) {
             self.error = Some("Ce torrent a déjà une session active.".into());
             return false;
@@ -273,6 +306,8 @@ impl App {
             leechers: None,
             listener_port: None,
             handshakes: 0,
+            target_bytes: Some(target_bytes),
+            torrent_size: Some(details.size),
         };
         if let Some(index) = replace {
             self.sessions[index] = session;
@@ -289,6 +324,7 @@ impl App {
             defaults: FormSettings {
                 rate: self.rate,
                 target: self.target,
+                upload_percent: self.percentage_mode.then_some(self.upload_percent),
                 variation: self.variation,
                 ramp: self.ramp,
                 pause_without_leechers: self.pause_without_leechers,
@@ -303,6 +339,8 @@ impl App {
     fn apply_document(&mut self, doc: Document) {
         self.rate = doc.defaults.rate;
         self.target = doc.defaults.target;
+        self.percentage_mode = doc.defaults.upload_percent.is_some();
+        self.upload_percent = doc.defaults.upload_percent.unwrap_or(300);
         self.variation = doc.defaults.variation;
         self.ramp = doc.defaults.ramp;
         self.pause_without_leechers = doc.defaults.pause_without_leechers;
@@ -360,8 +398,18 @@ impl App {
                 .add_filter("Torrent", &["torrent"])
                 .pick_file()
         {
-            self.file = Some(path);
-            self.error = None;
+            match inspect_details(&path) {
+                Ok(details) => {
+                    self.file = Some(path);
+                    self.file_details = Some(details);
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.file = None;
+                    self.file_details = None;
+                    self.error = Some(error);
+                }
+            }
         }
         if let Some(file) = &self.file {
             ui.label(
@@ -395,13 +443,50 @@ impl App {
             self.rate as f64 * 3600.0 / 1_048_576.0
         ));
         ui.add_space(12.0);
-        ui.label("Volume maximal de la session");
-        ui.add(
-            egui::DragValue::new(&mut self.target)
-                .range(1..=1_000_000)
-                .speed(64)
-                .suffix(" Mio"),
-        );
+        ui.label("Plafond d’upload de la session");
+        egui::ComboBox::from_id_salt("limit-mode")
+            .selected_text(if self.percentage_mode {
+                "Pourcentage du torrent"
+            } else {
+                "Volume fixe"
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.percentage_mode, true, "Pourcentage du torrent");
+                ui.selectable_value(&mut self.percentage_mode, false, "Volume fixe");
+            });
+        if self.percentage_mode {
+            ui.add(
+                egui::DragValue::new(&mut self.upload_percent)
+                    .range(1..=100_000)
+                    .speed(25)
+                    .suffix(" %"),
+            );
+            ui.weak(format!(
+                "Soit {:.2} × la taille du torrent",
+                f64::from(self.upload_percent) / 100.0
+            ));
+        } else {
+            ui.add(
+                egui::DragValue::new(&mut self.target)
+                    .range(1..=1_000_000)
+                    .speed(64)
+                    .suffix(" Mio"),
+            );
+        }
+        if let (Some(file), Some(details)) = (&self.file, &self.file_details) {
+            match self.settings_for(file.clone()).target_bytes(details.size) {
+                Ok(target) => {
+                    ui.weak(format!(
+                        "Taille : {:.2} Gio · plafond : {:.2} Gio",
+                        details.size as f64 / 1_073_741_824.0,
+                        target as f64 / 1_073_741_824.0
+                    ));
+                }
+                Err(error) => {
+                    ui.colored_label(Color32::LIGHT_RED, error);
+                }
+            }
+        }
         ui.add_space(12.0);
         ui.label("Variations du débit");
         ui.add(egui::Slider::new(&mut self.variation, 0..=100).suffix(" %"));
@@ -531,8 +616,17 @@ impl App {
                         });
                         ui.weak(session.settings.client_profile.label());
                         ui.add_space(6.0);
-                        let target = session.settings.upload_mib as f64 * 1_048_576.0;
-                        ui.add(egui::ProgressBar::new((session.simulated as f64 / target).clamp(0.0, 1.0) as f32).text(format!("{:.1} / {} Mio simulés", session.simulated as f64 / 1_048_576.0, session.settings.upload_mib)));
+                        let limit_label = match (session.settings.upload_mib, session.settings.upload_percent) {
+                            (Some(mib), _) => format!("Plafond fixe : {mib} Mio"),
+                            (None, percent) => format!("Plafond : {} % de la taille du torrent", percent.unwrap_or(300)),
+                        };
+                        ui.weak(limit_label);
+                        let (fraction, progress_text) = match session.target_bytes {
+                            Some(target) => ((session.simulated as f64 / target as f64).clamp(0.0, 1.0) as f32, format!("{:.2} / {:.2} Mio simulés", session.simulated as f64 / 1_048_576.0, target as f64 / 1_048_576.0)),
+                            None => (0.0, "Plafond calculé au démarrage".into()),
+                        };
+                        ui.add(egui::ProgressBar::new(fraction).text(progress_text));
+                        if let Some(size) = session.torrent_size { ui.weak(format!("Taille du torrent : {:.2} Gio", size as f64 / 1_073_741_824.0)); }
                         ui.label(format!("{:.0} Kio/s actuellement  ·  moyenne visée {} Kio/s  ·  variation ±{} %", session.speed, session.settings.rate_kib, session.settings.variation_percent));
                         ui.weak(format!("Dernière déclaration acceptée : {:.1} Mio", session.announced as f64 / 1_048_576.0));
                         let count = |value: Option<u64>| value.map_or_else(|| "?".into(), |n| n.to_string());
@@ -712,7 +806,8 @@ mod tests {
                 name: name.into(),
                 settings: Args {
                     torrent: name.into(),
-                    upload_mib: 1024,
+                    upload_mib: Some(1024),
+                    upload_percent: None,
                     rate_kib: 128,
                     variation_percent: 25,
                     ramp_seconds: 30,
@@ -736,6 +831,8 @@ mod tests {
                 leechers: None,
                 listener_port: None,
                 handshakes: 0,
+                target_bytes: None,
+                torrent_size: None,
             },
             tx,
         )

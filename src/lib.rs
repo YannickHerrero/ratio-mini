@@ -31,8 +31,12 @@ pub struct Args {
     /// Fichier .torrent (v1 ou hybride)
     pub torrent: PathBuf,
     /// Volume total à déclarer pendant cette session, en Mio
-    #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u64).range(1..))]
-    pub upload_mib: u64,
+    #[arg(long, conflicts_with = "upload_percent", value_parser = clap::value_parser!(u64).range(1..))]
+    pub upload_mib: Option<u64>,
+    /// Plafond en pourcentage de la taille du torrent (300 par défaut sans --upload-mib)
+    #[arg(long, conflicts_with = "upload_mib", value_parser = clap::value_parser!(u32).range(1..=100_000))]
+    #[serde(default)]
+    pub upload_percent: Option<u32>,
     /// Vitesse moyenne visée en Kio/s
     #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u64).range(1..))]
     pub rate_kib: u64,
@@ -59,6 +63,29 @@ pub struct Args {
     #[arg(long)]
     #[serde(default)]
     pub handshake: bool,
+}
+
+impl Args {
+    pub fn target_bytes(&self, torrent_size: u64) -> Result<u64> {
+        let target = match (self.upload_mib, self.upload_percent) {
+            (Some(mib), None) => mib.checked_mul(1024 * 1024).ok_or("Volume trop grand")?,
+            (None, percent) => {
+                let percent = percent.unwrap_or(300);
+                if !(1..=100_000).contains(&percent) {
+                    return Err("Pourcentage invalide".into());
+                }
+                u64::try_from((u128::from(torrent_size) * u128::from(percent)).div_ceil(100))
+                    .map_err(|_| "Volume proportionnel trop grand")?
+            }
+            (Some(_), Some(_)) => {
+                return Err("Choisir un plafond fixe ou proportionnel, pas les deux".into());
+            }
+        };
+        if target == 0 {
+            return Err("Le plafond d'upload est nul (torrent vide ou volume invalide)".into());
+        }
+        Ok(target)
+    }
 }
 
 #[cfg(feature = "gui")]
@@ -253,7 +280,13 @@ fn torrent(data: &[u8]) -> Result<Torrent> {
 }
 
 /// Validate locally and return the torrent's info hash (no tracker contact).
-pub fn inspect(path: &std::path::Path) -> Result<String> {
+#[derive(Clone, Debug)]
+pub struct TorrentMetadata {
+    pub id: String,
+    pub size: u64,
+}
+
+pub fn inspect_details(path: &std::path::Path) -> Result<TorrentMetadata> {
     let mut bytes = Vec::new();
     fs::File::open(path)
         .map_err(|_| "Impossible d'ouvrir le .torrent")?
@@ -263,11 +296,15 @@ pub fn inspect(path: &std::path::Path) -> Result<String> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err("Torrent supérieur à 16 Mio".into());
     }
-    Ok(torrent(&bytes)?
-        .hash
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    let t = torrent(&bytes)?;
+    Ok(TorrentMetadata {
+        id: t.hash.iter().map(|b| format!("{b:02x}")).collect(),
+        size: t.size,
+    })
+}
+
+pub fn inspect(path: &std::path::Path) -> Result<String> {
+    Ok(inspect_details(path)?.id)
 }
 
 fn escape(bytes: &[u8]) -> String {
@@ -554,6 +591,10 @@ fn ramp_weight(from: Duration, to: Duration, ramp: Duration) -> u128 {
 #[derive(Debug, Clone)]
 pub enum Event {
     Log(String),
+    Metadata {
+        torrent_size: u64,
+        target_bytes: u64,
+    },
     Listener {
         port: u16,
         answered: u64,
@@ -577,17 +618,12 @@ pub enum Event {
 pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> Result<()> {
     macro_rules! report { ($($arg:tt)*) => { emit(Event::Log(format!($($arg)*))) }; }
     if args.rate_kib == 0
-        || args.upload_mib == 0
         || args.variation_percent > 100
         || args.ramp_seconds > 3600
         || args.port == 0
     {
         return Err("Paramètres de session invalides".into());
     }
-    let target = args
-        .upload_mib
-        .checked_mul(1024 * 1024)
-        .ok_or("Volume trop grand")?;
     let rate = args
         .rate_kib
         .checked_mul(1024)
@@ -602,6 +638,11 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         return Err("Torrent supérieur à 16 Mio".into());
     }
     let t = torrent(&bytes)?;
+    let target = args.target_bytes(t.size)?;
+    emit(Event::Metadata {
+        torrent_size: t.size,
+        target_bytes: target,
+    });
     report!(
         "Tracker : {}://{} (chemin et passkey masqués)",
         t.tracker.scheme(),
@@ -609,8 +650,9 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
     );
     report!("Taille du torrent : {} octets", t.size);
     report!(
-        "Session : {} Mio, moyenne visée {} Kio/s, variation +/-{} %. downloaded=0, left=0.",
-        args.upload_mib,
+        "Session : plafond {} octets ({:.2} Mio), moyenne visée {} Kio/s, variation +/-{} %. downloaded=0, left=0.",
+        target,
+        target as f64 / 1_048_576.0,
         args.rate_kib,
         args.variation_percent
     );
@@ -799,6 +841,48 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
 mod tests {
     use super::*;
     #[test]
+    fn percentage_limits_use_content_size_and_round_up_only_fractional_bytes() {
+        let args = Args::try_parse_from(["ratio-mini", "test.torrent"]).unwrap();
+        assert_eq!(
+            args.target_bytes(4 * 1024 * 1024 * 1024).unwrap(),
+            12 * 1024 * 1024 * 1024
+        );
+        let args =
+            Args::try_parse_from(["ratio-mini", "test.torrent", "--upload-percent", "1"]).unwrap();
+        assert_eq!(args.target_bytes(1).unwrap(), 1);
+        assert_eq!(args.target_bytes(101).unwrap(), 2);
+        assert!(args.target_bytes(0).is_err());
+        let args = Args::try_parse_from(["ratio-mini", "test.torrent", "--upload-percent", "101"])
+            .unwrap();
+        assert!(args.target_bytes(u64::MAX).is_err());
+        let args =
+            Args::try_parse_from(["ratio-mini", "test.torrent", "--upload-mib", "2"]).unwrap();
+        assert_eq!(args.target_bytes(1).unwrap(), 2 * 1024 * 1024);
+        assert!(
+            Args::try_parse_from([
+                "ratio-mini",
+                "test.torrent",
+                "--upload-mib",
+                "2",
+                "--upload-percent",
+                "300"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["ratio-mini", "test.torrent", "--upload-percent", "0"]).is_err()
+        );
+    }
+
+    #[test]
+    fn multi_file_limit_uses_sum_of_payload_lengths() {
+        let data = b"d8:announce23:http://localhost/a?pk=x4:infod5:filesld6:lengthi5eed6:lengthi7eee6:pieces0:ee";
+        let t = torrent(data).unwrap();
+        assert_eq!(t.size, 12);
+        let args = Args::try_parse_from(["ratio-mini", "test.torrent"]).unwrap();
+        assert_eq!(args.target_bytes(t.size).unwrap(), 36);
+    }
+    #[test]
     fn handshake_identity_matches_profile_announce_and_port_is_released() {
         use std::{
             io::Write,
@@ -866,7 +950,8 @@ mod tests {
             run_session(
                 Args {
                     torrent: fixture.clone(),
-                    upload_mib: 1,
+                    upload_mib: Some(1),
+                    upload_percent: None,
                     rate_kib: 128,
                     variation_percent: 25,
                     ramp_seconds: 30,
@@ -1068,7 +1153,8 @@ mod tests {
                 run_session(
                     Args {
                         torrent: path,
-                        upload_mib: 1,
+                        upload_mib: Some(1),
+                        upload_percent: None,
                         rate_kib: 128,
                         variation_percent: 25,
                         ramp_seconds: 30,

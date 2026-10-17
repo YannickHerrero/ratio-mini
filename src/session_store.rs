@@ -11,6 +11,8 @@ use std::{
 pub struct FormSettings {
     pub rate: u64,
     pub target: u64,
+    #[serde(default)]
+    pub upload_percent: Option<u32>,
     pub variation: u8,
     pub ramp: u16,
     pub pause_without_leechers: bool,
@@ -49,14 +51,19 @@ impl Document {
                 self.defaults.variation,
                 self.defaults.ramp,
             )
+            || self
+                .defaults
+                .upload_percent
+                .is_some_and(|p| !(1..=100_000).contains(&p))
             || self.defaults.port == 0
             || self.torrents.iter().any(|a| {
                 !valid(
                     a.rate_kib,
-                    a.upload_mib,
+                    a.upload_mib.unwrap_or(1),
                     a.variation_percent,
                     a.ramp_seconds,
                 ) || a.port == 0
+                    || a.target_bytes(1).is_err()
             })
         {
             return Err("Liste de sessions incompatible ou paramètres invalides.".into());
@@ -113,6 +120,7 @@ mod tests {
             defaults: FormSettings {
                 rate: 128,
                 target: 1024,
+                upload_percent: None,
                 variation: 25,
                 ramp: 30,
                 pause_without_leechers: true,
@@ -122,7 +130,8 @@ mod tests {
             },
             torrents: vec![Args {
                 torrent: "chemin avec espaces/été.torrent".into(),
-                upload_mib: 2048,
+                upload_mib: Some(2048),
+                upload_percent: None,
                 rate_kib: 512,
                 variation_percent: 15,
                 ramp_seconds: 60,
@@ -162,6 +171,20 @@ mod tests {
     }
 
     #[test]
+    fn percentage_mode_round_trips_and_conflicting_limits_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.json");
+        let mut doc = document();
+        doc.defaults.upload_percent = Some(300);
+        doc.torrents[0].upload_mib = None;
+        doc.torrents[0].upload_percent = Some(300);
+        save(&path, &doc).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(doc.clone()));
+        doc.torrents[0].upload_mib = Some(1);
+        assert!(save(&path, &doc).is_err());
+    }
+
+    #[test]
     fn old_session_files_default_to_native_profile() {
         let mut value = serde_json::to_value(document()).unwrap();
         value["defaults"]
@@ -173,6 +196,10 @@ mod tests {
             .unwrap()
             .remove("handshake");
         value["defaults"].as_object_mut().unwrap().remove("port");
+        value["defaults"]
+            .as_object_mut()
+            .unwrap()
+            .remove("upload_percent");
         value["torrents"][0]
             .as_object_mut()
             .unwrap()
@@ -181,6 +208,10 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("handshake");
+        value["torrents"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("upload_percent");
         let loaded: Document = serde_json::from_value(value).unwrap();
         assert_eq!(
             loaded.defaults.client_profile,
@@ -188,6 +219,8 @@ mod tests {
         );
         assert!(!loaded.defaults.handshake && !loaded.torrents[0].handshake);
         assert_eq!(loaded.defaults.port, 6881);
+        assert_eq!(loaded.defaults.upload_percent, None);
+        assert_eq!(loaded.torrents[0].upload_mib, Some(2048));
         assert_eq!(
             loaded.torrents[0].client_profile,
             crate::profiles::ClientProfile::Native
