@@ -17,6 +17,7 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, String>;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
+mod peer_listener;
 mod profile_transport;
 pub mod profiles;
 
@@ -44,7 +45,7 @@ pub struct Args {
     /// Effectuer les requêtes vers le tracker
     #[arg(long)]
     pub send: bool,
-    /// Port annoncé (aucun port n'est ouvert par le programme)
+    /// Port annoncé et, si --handshake est activé, port d'écoute TCP
     #[arg(long, default_value_t = 6881, value_parser = clap::value_parser!(u16).range(1..))]
     pub port: u16,
     /// Continuer même si le tracker indique zéro leecher
@@ -54,6 +55,10 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = profiles::ClientProfile::Native)]
     #[serde(default)]
     pub client_profile: profiles::ClientProfile,
+    /// Répondre au handshake BitTorrent entrant (IPv4, aucun transfert de pièces)
+    #[arg(long)]
+    #[serde(default)]
+    pub handshake: bool,
 }
 
 #[cfg(feature = "gui")]
@@ -549,6 +554,10 @@ fn ramp_weight(from: Duration, to: Duration, ramp: Duration) -> u128 {
 #[derive(Debug, Clone)]
 pub enum Event {
     Log(String),
+    Listener {
+        port: u16,
+        answered: u64,
+    },
     Retrying {
         seconds: u64,
         attempt: u8,
@@ -625,6 +634,17 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
     let identity = profiles::Identity::new(args.client_profile);
     let peer = identity.peer;
     report!("Profil : {}", args.client_profile.label());
+    let listener = if args.handshake {
+        let listener = peer_listener::register(args.port, t.hash, peer)?;
+        report!("Handshake TCP IPv4 actif sur le port {}.", listener.port());
+        emit(Event::Listener {
+            port: listener.port(),
+            answered: 0,
+        });
+        Some(listener)
+    } else {
+        None
+    };
     let make_url = |amount, event, tracker_id: Option<&[u8]>| {
         identity
             .url(
@@ -669,6 +689,12 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         let mut amount = traffic.advance_paused(start.elapsed(), paused);
         let stopping = stop.load(Ordering::SeqCst);
         if last_progress.elapsed() >= Duration::from_millis(500) {
+            if let Some(listener) = &listener {
+                emit(Event::Listener {
+                    port: listener.port(),
+                    answered: listener.answered(),
+                });
+            }
             let ramp_factor = if args.ramp_seconds == 0 {
                 1.0
             } else {
@@ -729,6 +755,12 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
             rate_kib: 0.0,
         });
         if done {
+            if let Some(listener) = &listener {
+                emit(Event::Listener {
+                    port: listener.port(),
+                    answered: listener.answered(),
+                });
+            }
             break;
         }
         // Count time spent in the request under the previous state before applying new statistics.
@@ -766,6 +798,113 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn handshake_identity_matches_profile_announce_and_port_is_released() {
+        use std::{
+            io::Write,
+            net::{TcpListener, TcpStream},
+            sync::mpsc,
+        };
+        for profile in [
+            profiles::ClientProfile::Qbittorrent524,
+            profiles::ClientProfile::Transmission300,
+        ] {
+            let tracker = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/announce", tracker.local_addr().unwrap());
+            let port_probe = TcpListener::bind("0.0.0.0:0").unwrap();
+            let port = port_probe.local_addr().unwrap().port();
+            drop(port_probe);
+            let fixture = std::env::temp_dir()
+                .join(format!("ratio-handshake-{}.torrent", rand::random::<u64>()));
+            let info = b"d6:lengthi42e6:pieces0:e";
+            let hash: [u8; 20] = Sha1::digest(info).into();
+            let mut data = format!("d8:announce{}:{}4:info", url.len(), url).into_bytes();
+            data.extend_from_slice(info);
+            data.push(b'e');
+            fs::write(&fixture, data).unwrap();
+            let (tx, rx) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let mut peers = Vec::new();
+                for index in 0..2 {
+                    let (mut stream, _) = tracker.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let mut byte = [0];
+                    while !bytes.ends_with(b"\r\n\r\n") {
+                        stream.read_exact(&mut byte).unwrap();
+                        bytes.push(byte[0]);
+                    }
+                    let request = String::from_utf8(bytes).unwrap();
+                    let target = request.split_whitespace().nth(1).unwrap();
+                    let url = Url::parse(&format!("http://tracker.test{target}")).unwrap();
+                    let peer = url
+                        .query_pairs()
+                        .find(|(k, _)| k == "peer_id")
+                        .unwrap()
+                        .1
+                        .as_bytes()
+                        .to_vec();
+                    if index == 0 {
+                        tx.send(peer.clone()).unwrap();
+                    }
+                    peers.push(peer);
+                    let body = b"d8:intervali30e5:peers0:e";
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(body).unwrap();
+                }
+                assert_eq!(peers[0], peers[1]);
+            });
+            let stop = Arc::new(AtomicBool::new(false));
+            let signal = stop.clone();
+            run_session(
+                Args {
+                    torrent: fixture.clone(),
+                    upload_mib: 1,
+                    rate_kib: 128,
+                    variation_percent: 25,
+                    ramp_seconds: 30,
+                    send: true,
+                    port,
+                    ignore_swarm: false,
+                    client_profile: profile,
+                    handshake: true,
+                },
+                stop,
+                |event| {
+                    if let Event::Log(line) = event
+                        && line.starts_with("started accepté")
+                    {
+                        let expected = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        let mut message = [0; 68];
+                        message[0] = 19;
+                        message[1..20].copy_from_slice(b"BitTorrent protocol");
+                        message[28..48].copy_from_slice(&hash);
+                        stream.write_all(&message).unwrap();
+                        let mut reply = [0; 68];
+                        stream.read_exact(&mut reply).unwrap();
+                        assert_eq!(&reply[28..48], &hash);
+                        assert_eq!(&reply[48..68], expected.as_slice());
+                        signal.store(true, Ordering::SeqCst);
+                    }
+                },
+            )
+            .unwrap();
+            server.join().unwrap();
+            fs::remove_file(fixture).unwrap();
+            assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+        }
+    }
     #[test]
     fn temporary_failures_retry_with_backoff_and_server_delay() {
         let mut attempts = 0;
@@ -937,6 +1076,7 @@ mod tests {
                         port: 6881,
                         ignore_swarm: false,
                         client_profile: profiles::ClientProfile::Native,
+                        handshake: false,
                     },
                     stop,
                     |event| {

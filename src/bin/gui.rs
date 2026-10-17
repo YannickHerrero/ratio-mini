@@ -38,6 +38,8 @@ struct Session {
     paused: bool,
     seeders: Option<u64>,
     leechers: Option<u64>,
+    listener_port: Option<u16>,
+    handshakes: u64,
 }
 
 impl Session {
@@ -64,6 +66,8 @@ impl Session {
             paused: false,
             seeders: None,
             leechers: None,
+            listener_port: None,
+            handshakes: 0,
         }
     }
     fn request_stop(&mut self) {
@@ -76,6 +80,10 @@ impl Session {
     fn poll(&mut self) {
         while self.running {
             match self.receiver.try_recv() {
+                Ok(Message::Update(Event::Listener { port, answered })) => {
+                    self.listener_port = Some(port);
+                    self.handshakes = answered;
+                }
                 Ok(Message::Update(Event::Retrying { seconds, attempt })) => {
                     if !self.stop.load(Ordering::SeqCst) {
                         self.status = format!("Nouvelle tentative {attempt}/3 dans {seconds} s");
@@ -154,6 +162,8 @@ struct App {
     ramp: u16,
     pause_without_leechers: bool,
     client_profile: ratio_mini::profiles::ClientProfile,
+    handshake: bool,
+    port: u16,
     sessions: Vec<Session>,
     error: Option<String>,
     closing: bool,
@@ -172,6 +182,8 @@ impl Default for App {
             ramp: 30,
             pause_without_leechers: true,
             client_profile: ratio_mini::profiles::ClientProfile::Native,
+            handshake: true,
+            port: 6881,
             sessions: Vec::new(),
             error: None,
             closing: false,
@@ -194,9 +206,10 @@ impl App {
             variation_percent: self.variation.min(100),
             ramp_seconds: self.ramp.min(3600),
             send: true,
-            port: 6881,
+            port: self.port,
             ignore_swarm: !self.pause_without_leechers,
             client_profile: self.client_profile,
+            handshake: self.handshake,
         };
         if self.launch(settings, None) {
             self.file = None;
@@ -258,6 +271,8 @@ impl App {
             paused: false,
             seeders: None,
             leechers: None,
+            listener_port: None,
+            handshakes: 0,
         };
         if let Some(index) = replace {
             self.sessions[index] = session;
@@ -278,6 +293,8 @@ impl App {
                 ramp: self.ramp,
                 pause_without_leechers: self.pause_without_leechers,
                 client_profile: self.client_profile,
+                handshake: self.handshake,
+                port: self.port,
             },
             torrents: self.sessions.iter().map(|s| s.settings.clone()).collect(),
         }
@@ -290,6 +307,8 @@ impl App {
         self.ramp = doc.defaults.ramp;
         self.pause_without_leechers = doc.defaults.pause_without_leechers;
         self.client_profile = doc.defaults.client_profile;
+        self.handshake = doc.defaults.handshake;
+        self.port = doc.defaults.port;
         self.sessions = doc.torrents.iter().cloned().map(Session::idle).collect();
         self.saved = Some(doc);
         self.error = None;
@@ -393,17 +412,12 @@ impl App {
                 .suffix(" s"),
         );
         ui.checkbox(&mut self.pause_without_leechers, "Pause si aucun leecher");
+        ui.checkbox(&mut self.handshake, "Répondre au handshake TCP");
+        ui.horizontal(|ui| {
+            ui.label("Port partagé");
+            ui.add(egui::DragValue::new(&mut self.port).range(1..=65535));
+        });
         ui.add_space(18.0);
-        if ui
-            .add_enabled(
-                self.file.is_some() && !self.closing,
-                egui::Button::new(RichText::new("Ajouter et démarrer").strong())
-                    .min_size(egui::vec2(ui.available_width(), 40.0)),
-            )
-            .clicked()
-        {
-            self.add();
-        }
         ui.add_space(8.0);
         ui.weak(
             "Chaque session garde ses propres réglages. Le bouton démarre les annonces réseau.",
@@ -448,6 +462,19 @@ impl App {
         if let Some(error) = &self.error {
             ui.add_space(12.0);
             ui.colored_label(Color32::from_rgb(255, 145, 145), error);
+        }
+    }
+
+    fn add_button(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .add_enabled(
+                self.file.is_some() && !self.closing,
+                egui::Button::new(RichText::new("Ajouter et démarrer").strong())
+                    .min_size(egui::vec2(ui.available_width(), 40.0)),
+            )
+            .clicked()
+        {
+            self.add();
         }
     }
 
@@ -510,6 +537,9 @@ impl App {
                         ui.weak(format!("Dernière déclaration acceptée : {:.1} Mio", session.announced as f64 / 1_048_576.0));
                         let count = |value: Option<u64>| value.map_or_else(|| "?".into(), |n| n.to_string());
                         ui.weak(format!("Derniers chiffres — seeders : {}  ·  leechers : {}", count(session.seeders), count(session.leechers)));
+                        if let Some(port) = session.listener_port {
+                            ui.weak(format!("Handshake TCP : port {port}  ·  {} réponse(s){}", session.handshakes, if session.running { "" } else { " · écoute arrêtée" }));
+                        }
                         ui.horizontal(|ui| {
                             if session.running {
                                 if ui.add_enabled(!session.stop.load(Ordering::SeqCst), egui::Button::new("Arrêter")).clicked() { session.request_stop(); }
@@ -561,10 +591,16 @@ impl eframe::App for App {
             .exact_width(300.0)
             .resizable(false)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_space(14.0);
-                    self.form(ui);
-                });
+                let settings_height = (ui.available_height() - 60.0).max(0.0);
+                egui::ScrollArea::vertical()
+                    .max_height(settings_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(14.0);
+                        self.form(ui);
+                    });
+                ui.separator();
+                self.add_button(ui);
             });
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(14.0);
@@ -684,6 +720,7 @@ mod tests {
                     port: 6881,
                     ignore_swarm: false,
                     client_profile: ratio_mini::profiles::ClientProfile::Native,
+                    handshake: false,
                 },
                 stop: Arc::new(AtomicBool::new(false)),
                 receiver,
@@ -697,6 +734,8 @@ mod tests {
                 paused: false,
                 seeders: None,
                 leechers: None,
+                listener_port: None,
+                handshakes: 0,
             },
             tx,
         )

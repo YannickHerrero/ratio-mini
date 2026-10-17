@@ -16,6 +16,14 @@ pub struct FormSettings {
     pub pause_without_leechers: bool,
     #[serde(default)]
     pub client_profile: crate::profiles::ClientProfile,
+    #[serde(default)]
+    pub handshake: bool,
+    #[serde(default = "default_port")]
+    pub port: u16,
+}
+
+fn default_port() -> u16 {
+    6881
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -41,6 +49,7 @@ impl Document {
                 self.defaults.variation,
                 self.defaults.ramp,
             )
+            || self.defaults.port == 0
             || self.torrents.iter().any(|a| {
                 !valid(
                     a.rate_kib,
@@ -108,6 +117,8 @@ mod tests {
                 ramp: 30,
                 pause_without_leechers: true,
                 client_profile: crate::profiles::ClientProfile::Native,
+                handshake: false,
+                port: 6881,
             },
             torrents: vec![Args {
                 torrent: "chemin avec espaces/été.torrent".into(),
@@ -119,6 +130,7 @@ mod tests {
                 port: 6881,
                 ignore_swarm: false,
                 client_profile: crate::profiles::ClientProfile::Native,
+                handshake: false,
             }],
         }
     }
@@ -156,15 +168,26 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("client_profile");
+        value["defaults"]
+            .as_object_mut()
+            .unwrap()
+            .remove("handshake");
+        value["defaults"].as_object_mut().unwrap().remove("port");
         value["torrents"][0]
             .as_object_mut()
             .unwrap()
             .remove("client_profile");
+        value["torrents"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("handshake");
         let loaded: Document = serde_json::from_value(value).unwrap();
         assert_eq!(
             loaded.defaults.client_profile,
             crate::profiles::ClientProfile::Native
         );
+        assert!(!loaded.defaults.handshake && !loaded.torrents[0].handshake);
+        assert_eq!(loaded.defaults.port, 6881);
         assert_eq!(
             loaded.torrents[0].client_profile,
             crate::profiles::ClientProfile::Native
