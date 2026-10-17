@@ -55,7 +55,9 @@ Les compteurs sont transmis à chaque annonce, pas à chaque seconde. L'interval
 
 ## Fonctionnement et limites
 
-Le programme annonce `started` avec zéro octet, puis augmente `uploaded` selon le temps réellement écoulé. Il déclare `downloaded=0` et `left=0` : il se présente donc comme ayant le torrent complet. Chaque lancement crée une nouvelle session ; aucun état n'est sauvegardé et les compteurs repartent de zéro. En cas d'erreur, il s'arrête sans réessayer automatiquement ; un arrêt brutal ou une panne réseau peut empêcher l'annonce `stopped`.
+Le programme annonce `started` avec zéro octet, puis augmente `uploaded` selon le temps réellement écoulé. Il déclare `downloaded=0` et `left=0` : il se présente donc comme ayant le torrent complet. Chaque lancement crée une nouvelle session et les compteurs repartent de zéro. Un arrêt brutal ou une panne réseau peut empêcher l'annonce `stopped`.
+
+Les erreurs réseau, les réponses HTTP 429 et les erreurs HTTP 5xx déclenchent au plus trois nouvelles tentatives, après 60, 120 puis 240 secondes. Une valeur `Retry-After` exprimée en secondes peut prolonger ce délai. Une attente demandée supérieure à 24 heures arrête la session. Les refus explicites, les autres erreurs HTTP et les réponses invalides arrêtent immédiatement la session. L'attente peut être interrompue par **Arrêter** ; la requête finale `stopped` n'est pas relancée afin de ne pas prolonger indéfiniment la fermeture.
 
 Il utilise uniquement le champ `announce` du fichier : HTTP et HTTPS, torrents v1 ou hybrides. Pas d'UDP, de torrent v2 seul, de lien magnet, de sélection parmi plusieurs trackers, ni d'imitation d'un autre client. Son identité est `ratio-mini/0.1.0` avec un peer ID propre. Aucun débit ni variation ne garantit l'indétectabilité, l'acceptation des compteurs ou la hausse effective du ratio : cela dépend du tracker.
 

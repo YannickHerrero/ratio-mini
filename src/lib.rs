@@ -289,26 +289,119 @@ struct Reply {
     seeders: Option<u64>,
     leechers: Option<u64>,
 }
-fn announce(client: &Client, url: String) -> Result<Reply> {
+#[derive(Debug)]
+enum AnnounceError {
+    Temporary {
+        message: String,
+        retry_after: Option<u64>,
+    },
+    Rejected(String),
+}
+impl From<&str> for AnnounceError {
+    fn from(value: &str) -> Self {
+        Self::Rejected(value.into())
+    }
+}
+impl From<String> for AnnounceError {
+    fn from(value: String) -> Self {
+        Self::Rejected(value)
+    }
+}
+impl AnnounceError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Temporary { message, .. } | Self::Rejected(message) => message,
+        }
+    }
+}
+
+fn announce(client: &Client, url: String) -> std::result::Result<Reply, AnnounceError> {
     let response = client
         .get(url)
         .send()
-        .map_err(|_| "Échec réseau/TLS (URL masquée pour préserver la passkey)")?;
+        .map_err(|_| AnnounceError::Temporary {
+            message: "Échec réseau/TLS (URL masquée pour préserver la passkey)".into(),
+            retry_after: None,
+        })?;
     if !response.status().is_success() {
-        return Err(format!(
-            "Le tracker a renvoyé HTTP {}",
-            response.status().as_u16()
-        ));
+        let message = format!("Le tracker a renvoyé HTTP {}", response.status().as_u16());
+        return Err(
+            if response.status().is_server_error() || response.status().as_u16() == 429 {
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok());
+                AnnounceError::Temporary {
+                    message,
+                    retry_after,
+                }
+            } else {
+                AnnounceError::Rejected(message)
+            },
+        );
     }
     let mut bytes = Vec::new();
     response
         .take(1024 * 1024 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| "Lecture de la réponse impossible")?;
+        .map_err(|_| AnnounceError::Temporary {
+            message: "Lecture de la réponse impossible".into(),
+            retry_after: None,
+        })?;
     if bytes.len() > 1024 * 1024 {
         return Err("Réponse du tracker trop volumineuse".into());
     }
-    parse_reply(&bytes)
+    parse_reply(&bytes).map_err(AnnounceError::Rejected)
+}
+
+fn retry_request(
+    mut request: impl FnMut() -> std::result::Result<Reply, AnnounceError>,
+    mut wait: impl FnMut(Duration) -> bool,
+    emit: &impl Fn(Event),
+) -> Result<Option<Reply>> {
+    for attempt in 0..4_u8 {
+        match request() {
+            Ok(reply) => return Ok(Some(reply)),
+            Err(AnnounceError::Temporary {
+                message,
+                retry_after,
+            }) if attempt < 3 => {
+                // An unusually long Retry-After must not be shortened into an earlier retry.
+                if retry_after.is_some_and(|delay| delay > 86400) {
+                    return Err(
+                        "Le tracker demande une attente supérieure à 24 h ; session arrêtée."
+                            .into(),
+                    );
+                }
+                let seconds = (60_u64 << attempt).max(retry_after.unwrap_or(0));
+                emit(Event::Log(format!(
+                    "{message}. Nouvelle tentative dans {seconds} s ({}/3).",
+                    attempt + 1
+                )));
+                emit(Event::Retrying {
+                    seconds,
+                    attempt: attempt + 1,
+                });
+                if !wait(Duration::from_secs(seconds)) {
+                    return Ok(None);
+                }
+            }
+            Err(error) => return Err(error.message().to_owned()),
+        }
+    }
+    unreachable!()
+}
+
+fn wait_until_retry(stop: &AtomicBool, delay: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < delay {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100).min(delay.saturating_sub(start.elapsed())));
+    }
+    !stop.load(Ordering::SeqCst)
 }
 
 fn parse_reply(bytes: &[u8]) -> Result<Reply> {
@@ -418,6 +511,10 @@ fn ramp_weight(from: Duration, to: Duration, ramp: Duration) -> u128 {
 #[derive(Debug, Clone)]
 pub enum Event {
     Log(String),
+    Retrying {
+        seconds: u64,
+        attempt: u8,
+    },
     Swarm {
         seeders: Option<u64>,
         leechers: Option<u64>,
@@ -489,10 +586,15 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         .map_err(|_| "Initialisation HTTP impossible")?;
     let mut peer = *b"-RM0001-000000000000";
     rand::thread_rng().fill_bytes(&mut peer[8..]);
-    let mut reply = announce(
-        &client,
-        announce_url(&t, &peer, args.port, 0, Some("started"), None),
-    )?;
+    let start_url = announce_url(&t, &peer, args.port, 0, Some("started"), None);
+    let Some(mut reply) = retry_request(
+        || announce(&client, start_url.clone()),
+        |delay| wait_until_retry(&stop, delay),
+        &emit,
+    )?
+    else {
+        return Ok(());
+    };
     let mut paused = !args.ignore_swarm && reply.leechers == Some(0);
     emit(Event::Swarm {
         seeders: reply.seeders,
@@ -509,7 +611,7 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         reply.interval
     );
     loop {
-        let amount = traffic.advance_paused(start.elapsed(), paused);
+        let mut amount = traffic.advance_paused(start.elapsed(), paused);
         let stopping = stop.load(Ordering::SeqCst);
         if last_progress.elapsed() >= Duration::from_millis(500) {
             let ramp_factor = if args.ramp_seconds == 0 {
@@ -532,18 +634,42 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
             thread::sleep(Duration::from_millis(100));
             continue;
         }
-        let done = stopping || amount == target;
-        let next = announce(
-            &client,
-            announce_url(
-                &t,
-                &peer,
-                args.port,
-                amount,
-                if done { Some("stopped") } else { None },
-                reply.tracker_id.as_deref(),
-            ),
-        )?;
+        let mut done = stopping || amount == target;
+        let url = announce_url(
+            &t,
+            &peer,
+            args.port,
+            amount,
+            if done { Some("stopped") } else { None },
+            reply.tracker_id.as_deref(),
+        );
+        let next = if done {
+            announce(&client, url).map_err(|error| error.message().to_owned())?
+        } else {
+            match retry_request(
+                || announce(&client, url.clone()),
+                |delay| wait_until_retry(&stop, delay),
+                &emit,
+            )? {
+                Some(next) => next,
+                None => {
+                    done = true;
+                    amount = traffic.advance_paused(start.elapsed(), paused);
+                    announce(
+                        &client,
+                        announce_url(
+                            &t,
+                            &peer,
+                            args.port,
+                            amount,
+                            Some("stopped"),
+                            reply.tracker_id.as_deref(),
+                        ),
+                    )
+                    .map_err(|error| error.message().to_owned())?
+                }
+            }
+        };
         report!(
             "{} : {} octets déclarés acceptés par le tracker.",
             if done { "stopped" } else { "announce" },
@@ -592,6 +718,97 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn temporary_failures_retry_with_backoff_and_server_delay() {
+        let mut attempts = 0;
+        let mut waits = Vec::new();
+        let reply = retry_request(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(AnnounceError::Temporary {
+                        message: "indisponible".into(),
+                        retry_after: Some(90),
+                    })
+                } else {
+                    parse_reply(b"d8:intervali60e5:peers0:e").map_err(AnnounceError::Rejected)
+                }
+            },
+            |delay| {
+                waits.push(delay.as_secs());
+                true
+            },
+            &|_| {},
+        )
+        .unwrap();
+        assert!(reply.is_some());
+        assert_eq!(waits, [90, 120]);
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn rejection_never_retries_and_wait_can_be_cancelled() {
+        let mut attempts = 0;
+        assert!(
+            retry_request(
+                || {
+                    attempts += 1;
+                    Err(AnnounceError::Rejected("refus".into()))
+                },
+                |_| panic!("must not wait"),
+                &|_| {}
+            )
+            .is_err()
+        );
+        assert_eq!(attempts, 1);
+        let cancelled = retry_request(
+            || {
+                Err(AnnounceError::Temporary {
+                    message: "réseau".into(),
+                    retry_after: None,
+                })
+            },
+            |_| false,
+            &|_| {},
+        )
+        .unwrap();
+        assert!(cancelled.is_none());
+    }
+
+    #[test]
+    fn retries_are_bounded_and_never_shorten_extreme_server_delay() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        assert!(
+            retry_request(
+                || {
+                    attempts += 1;
+                    Err(AnnounceError::Temporary {
+                        message: "réseau".into(),
+                        retry_after: None,
+                    })
+                },
+                |_| {
+                    waits += 1;
+                    true
+                },
+                &|_| {}
+            )
+            .is_err()
+        );
+        assert_eq!((attempts, waits), (4, 3));
+        assert!(
+            retry_request(
+                || Err(AnnounceError::Temporary {
+                    message: "limite".into(),
+                    retry_after: Some(100000)
+                }),
+                |_| panic!("must stop"),
+                &|_| {}
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn swarm_statistics_distinguish_missing_and_zero() {
         let unknown = parse_reply(b"d8:intervali60e5:peers0:e").unwrap();

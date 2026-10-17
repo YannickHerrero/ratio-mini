@@ -48,6 +48,12 @@ impl Session {
     fn poll(&mut self) {
         while self.running {
             match self.receiver.try_recv() {
+                Ok(Message::Update(Event::Retrying { seconds, attempt })) => {
+                    if !self.stop.load(Ordering::SeqCst) {
+                        self.status = format!("Nouvelle tentative {attempt}/3 dans {seconds} s");
+                    }
+                    self.speed = 0.0;
+                }
                 Ok(Message::Update(Event::Log(line))) => {
                     if line.starts_with("started accepté")
                         && !self.paused
