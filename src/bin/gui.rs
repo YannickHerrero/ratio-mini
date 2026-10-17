@@ -756,7 +756,29 @@ impl Drop for App {
 }
 
 fn main() -> eframe::Result {
+    let software = std::env::args().any(|arg| arg == "--software-renderer");
+    let mut graphics = eframe::egui_wgpu::WgpuSetupCreateNew::default();
+    // Keep OpenGL disabled even if WGPU_BACKEND is set in the environment.
+    graphics.instance_descriptor.backends = wgpu::Backends::DX12;
+    graphics.power_preference = wgpu::PowerPreference::LowPower;
+    if software {
+        graphics.native_adapter_selector = Some(Arc::new(|adapters, surface| {
+            adapters
+                .iter()
+                .find(|adapter| {
+                    adapter.get_info().device_type == wgpu::DeviceType::Cpu
+                        && surface.is_none_or(|surface| adapter.is_surface_supported(surface))
+                })
+                .cloned()
+                .ok_or_else(|| "Rendu logiciel Direct3D 12 indisponible sur cette machine.".into())
+        }));
+    }
     let options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: graphics.into(),
+            ..Default::default()
+        },
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([900.0, 600.0]),
@@ -765,7 +787,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Ratio Mini",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let mut style = (*cc.egui_ctx.style()).clone();
             style.spacing.item_spacing = egui::vec2(9.0, 8.0);

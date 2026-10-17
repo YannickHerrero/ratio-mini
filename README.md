@@ -6,6 +6,8 @@ Petit programme Rust pour Windows, avec interface graphique ou ligne de commande
 
 Double-cliquer sur **`ratio-mini-gui.exe`**. Aucune installation ni commande n'est nécessaire.
 
+Depuis la version 0.5.2, l'affichage utilise Direct3D 12 via wgpu, sans OpenGL. Ce changement contourne le pilote Intel OpenGL impliqué dans un crash constaté sous Windows. En cas de problème graphique, lancer `ratio-mini-gui.exe --software-renderer` pour utiliser le rendu logiciel Microsoft (WARP), si disponible. Ce mode peut consommer davantage de CPU. Il ne garantit pas l'absence de tout plantage ; la liste restaurée reste inactive jusqu'au démarrage manuel des sessions.
+
 1. Dans le panneau de gauche, cliquer sur **Choisir un fichier .torrent…**.
 2. Régler la vitesse moyenne, le volume maximal, les variations et la durée du démarrage progressif.
 3. Cliquer sur **Ajouter et démarrer** : les annonces réseau commencent et la session apparaît à droite.
