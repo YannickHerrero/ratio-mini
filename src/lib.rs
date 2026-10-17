@@ -23,7 +23,7 @@ const MAX_BYTES: u64 = 16 * 1024 * 1024;
     version,
     about = "Petit client de déclaration d'upload HTTP(S). Aperçu sans réseau par défaut."
 )]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Args {
     /// Fichier .torrent (v1 ou hybride)
     pub torrent: PathBuf,
@@ -49,6 +49,9 @@ pub struct Args {
     #[arg(long)]
     pub ignore_swarm: bool,
 }
+
+#[cfg(feature = "gui")]
+pub mod session_store;
 
 #[derive(Debug)]
 enum Value<'a> {

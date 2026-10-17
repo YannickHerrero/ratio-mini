@@ -2,3 +2,4 @@
 *.torrent
 /ratio-mini*.exe
 /SHA256SUMS.txt
+/ratio-mini-sessions.json

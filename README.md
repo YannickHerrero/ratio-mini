@@ -15,9 +15,13 @@ La liste affiche le débit simulé, le volume calculé et le dernier volume acce
 
 Les nombres de seeders et de leechers sont affichés quand le tracker les fournit (`?` sinon). Par défaut, le compteur d'upload est suspendu si une réponse annonce zéro leecher. Les annonces continuent à l'intervalle habituel pour recevoir de nouvelles statistiques ; la reprise n'ajoute pas de volume pour le temps passé en pause. La case **Pause si aucun leecher** permet de régler ce comportement pour chaque nouvel ajout. En ligne de commande, `--ignore-swarm` désactive cette pause.
 
-**Arrêter** demande une annonce finale pour une session ; **Tout arrêter** agit sur toutes. **Retirer** et **Nettoyer la liste** enlèvent uniquement des sessions inactives. Les doublons actifs sont reconnus par le hash du torrent, même si le fichier porte un autre nom. Après un arrêt ou une erreur, un torrent peut être ajouté à nouveau.
+**Arrêter** demande une annonce finale pour une session ; **Tout arrêter** agit sur toutes. **Démarrer** relance une session inactive avec ses réglages et de nouveaux compteurs. **Retirer** et **Nettoyer la liste** enlèvent uniquement des sessions inactives. Les doublons actifs sont reconnus par le hash du torrent, même si le fichier porte un autre nom.
 
-Fermer la fenêtre demande d'abord l'arrêt des sessions. La fenêtre reste ouverte jusqu'à la fin des requêtes, dont le délai maximal est de 20 secondes chacune. La liste et les réglages ne sont pas conservés après fermeture ; les torrents ne sont pas relancés automatiquement. Aucun tracker n'est contacté au simple démarrage de l'application.
+Fermer la fenêtre demande d'abord l'arrêt des sessions. La fenêtre reste ouverte jusqu'à la fin des requêtes, dont le délai maximal est de 20 secondes chacune. Aucun tracker n'est contacté au simple démarrage de l'application.
+
+La liste et les réglages sont sauvegardés automatiquement dans `ratio-mini-sessions.json`, à côté de l'exécutable, au plus tard deux secondes après une modification et à la fermeture. Le dossier doit être accessible en écriture. Le fichier contient les chemins vers les torrents et leurs paramètres ; il ne contient pas les URL de tracker, les passkeys ou les compteurs. La restauration n'ouvre pas les fichiers torrent et ne démarre aucune session. Les chemins doivent encore être valides au moment de cliquer sur **Démarrer**.
+
+**Enregistrer…** exporte une copie JSON ; **Charger…** remplace la liste quand toutes les sessions sont arrêtées. L'écriture passe par un fichier temporaire puis un remplacement atomique. Un fichier invalide au démarrage est conservé et désactive la sauvegarde automatique pour cette exécution. La liste est limitée à 256 entrées ; un fichier JSON est limité à 1 Mio.
 
 ## Utilisation
 
@@ -81,7 +85,7 @@ Référence du protocole : [spécification officielle BitTorrent, BEP 3](https:/
 
 ## Lecture comparative de RatioMaster.NET
 
-Code examiné le 17 octobre 2026, au commit [`10d28c4`](https://github.com/NikolayIT/RatioMaster.NET/tree/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217). Cette comparaison décrit le code ; elle ne constitue pas un essai sur un tracker ni une preuve d'indétectabilité. Le tableau décrit les écarts relevés pendant la lecture initiale. Les statistiques du groupe et la pause sur zéro leecher ont depuis été intégrées à notre moteur et à l'interface.
+Code examiné le 17 octobre 2026, au commit [`10d28c4`](https://github.com/NikolayIT/RatioMaster.NET/tree/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217). Cette comparaison décrit le code ; elle ne constitue pas un essai sur un tracker ni une preuve d'indétectabilité. Le tableau décrit les écarts relevés pendant la lecture initiale. Les statistiques du groupe, la pause sur zéro leecher, les nouvelles tentatives après erreur temporaire et la sauvegarde atomique des listes ont depuis été intégrées à notre moteur et à l'interface.
 
 | Élément observé | Comparaison et intérêt |
 | --- | --- |
@@ -93,6 +97,6 @@ Code examiné le 17 octobre 2026, au commit [`10d28c4`](https://github.com/Nikol
 | [Tests des requêtes](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core.Tests/Tracker/RequestGoldenTests.cs) | Les tests figent les octets attendus par leurs profils. C'est une bonne protection contre les régressions, mais pas une validation des contrôles d'un site réel. |
 | [Sauvegarde des sessions](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core/Sessions/SessionFile.cs) | Écriture temporaire puis remplacement du fichier. C'est une approche utile pour ajouter plus tard une persistance fiable de notre liste et de ses réglages. |
 
-Les améliorations de fiabilité à prioriser seraient la sauvegarde de la liste sans relance automatique, la modification des réglages d'une session et une gestion explicite des erreurs temporaires. Les statistiques du tracker peuvent aussi être affichées, en distinguant une valeur absente d'une valeur zéro. Elles ne constituent pas une mesure complète des transferts réels.
+Les statistiques du tracker sont affichées en distinguant une valeur absente d'une valeur zéro. Elles ne constituent pas une mesure complète des transferts réels. Les variations restent centrées sur la moyenne visée. Notre implémentation conserve sa propre identité et n'intègre ni imitation de clients tiers, ni lecture mémoire d'autres logiciels, ni listener de handshake.
 
 Le dépôt amont est sous licence MIT ; toute reprise substantielle de son code doit conserver ses mentions de licence. La présente version utilise une implémentation Rust propre et n'incorpore pas de code provenant de ce dépôt.

@@ -5,7 +5,7 @@ edition = "2024"
 default-run = "ratio-mini"
 
 [features]
-gui = ["dep:eframe", "dep:rfd"]
+gui = ["dep:eframe", "dep:rfd", "dep:serde_json", "dep:tempfile"]
 
 [[bin]]
 name = "ratio-mini-gui"
@@ -20,6 +20,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha1 = "0.10"
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit"], optional = true }
 rfd = { version = "0.15", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
 
 [profile.release]
 strip = true

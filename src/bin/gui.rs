@@ -1,7 +1,10 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use eframe::egui::{self, Color32, RichText};
-use ratio_mini::{Args, Event, inspect, run_session};
+use ratio_mini::{
+    Args, Event, inspect, run_session,
+    session_store::{self, Document, FormSettings},
+};
 use std::{
     collections::VecDeque,
     path::PathBuf,
@@ -11,7 +14,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 enum Message {
@@ -38,6 +41,31 @@ struct Session {
 }
 
 impl Session {
+    fn idle(settings: Args) -> Self {
+        let (_tx, receiver) = mpsc::channel();
+        Self {
+            id: String::new(),
+            name: settings
+                .torrent
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            stop: Arc::new(AtomicBool::new(false)),
+            receiver,
+            running: false,
+            status: "Prêt à démarrer".into(),
+            simulated: 0,
+            announced: 0,
+            speed: 0.0,
+            logs: VecDeque::new(),
+            failed: false,
+            paused: false,
+            seeders: None,
+            leechers: None,
+        }
+    }
     fn request_stop(&mut self) {
         if self.running {
             self.stop.store(true, Ordering::SeqCst);
@@ -128,6 +156,9 @@ struct App {
     sessions: Vec<Session>,
     error: Option<String>,
     closing: bool,
+    storage: Option<PathBuf>,
+    saved: Option<Document>,
+    next_save: Instant,
 }
 
 impl Default for App {
@@ -142,6 +173,9 @@ impl Default for App {
             sessions: Vec::new(),
             error: None,
             closing: false,
+            storage: None,
+            saved: None,
+            next_save: Instant::now(),
         }
     }
 }
@@ -151,17 +185,6 @@ impl App {
         let Some(file) = self.file.clone() else {
             return;
         };
-        let id = match inspect(&file) {
-            Ok(id) => id,
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        };
-        if self.sessions.iter().any(|s| s.id == id && s.running) {
-            self.error = Some("Ce torrent a déjà une session active.".into());
-            return;
-        }
         let settings = Args {
             torrent: file.clone(),
             upload_mib: self.target.clamp(1, 1_000_000),
@@ -172,6 +195,28 @@ impl App {
             port: 6881,
             ignore_swarm: !self.pause_without_leechers,
         };
+        if self.launch(settings, None) {
+            self.file = None;
+        }
+    }
+
+    fn launch(&mut self, mut settings: Args, replace: Option<usize>) -> bool {
+        settings.send = true;
+        if replace.is_none() && self.sessions.len() >= 256 {
+            self.error = Some("La liste est limitée à 256 torrents.".into());
+            return false;
+        }
+        let id = match inspect(&settings.torrent) {
+            Ok(id) => id,
+            Err(error) => {
+                self.error = Some(error);
+                return false;
+            }
+        };
+        if self.sessions.iter().any(|s| s.id == id && s.running) {
+            self.error = Some("Ce torrent a déjà une session active.".into());
+            return false;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, receiver) = mpsc::channel();
         let worker_args = settings.clone();
@@ -187,11 +232,12 @@ impl App {
             .is_err()
         {
             self.error = Some("Impossible de démarrer une session supplémentaire.".into());
-            return;
+            return false;
         }
-        self.sessions.push(Session {
+        let session = Session {
             id,
-            name: file
+            name: settings
+                .torrent
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
@@ -209,9 +255,70 @@ impl App {
             paused: false,
             seeders: None,
             leechers: None,
-        });
-        self.file = None;
+        };
+        if let Some(index) = replace {
+            self.sessions[index] = session;
+        } else {
+            self.sessions.push(session);
+        }
         self.error = None;
+        true
+    }
+
+    fn document(&self) -> Document {
+        Document {
+            version: 1,
+            defaults: FormSettings {
+                rate: self.rate,
+                target: self.target,
+                variation: self.variation,
+                ramp: self.ramp,
+                pause_without_leechers: self.pause_without_leechers,
+            },
+            torrents: self.sessions.iter().map(|s| s.settings.clone()).collect(),
+        }
+    }
+
+    fn apply_document(&mut self, doc: Document) {
+        self.rate = doc.defaults.rate;
+        self.target = doc.defaults.target;
+        self.variation = doc.defaults.variation;
+        self.ramp = doc.defaults.ramp;
+        self.pause_without_leechers = doc.defaults.pause_without_leechers;
+        self.sessions = doc.torrents.iter().cloned().map(Session::idle).collect();
+        self.saved = Some(doc);
+        self.error = None;
+    }
+
+    fn restore(path: PathBuf) -> Self {
+        let mut app = Self::default();
+        match session_store::load(&path) {
+            Ok(Some(doc)) => {
+                app.apply_document(doc);
+                app.storage = Some(path);
+            }
+            Ok(None) => app.storage = Some(path),
+            Err(error) => {
+                app.error = Some(format!(
+                    "{error} Sauvegarde automatique désactivée pour préserver ce fichier."
+                ));
+            }
+        }
+        app
+    }
+
+    fn persist(&mut self) {
+        let Some(path) = self.storage.as_ref() else {
+            return;
+        };
+        let doc = self.document();
+        if self.saved.as_ref() == Some(&doc) {
+            return;
+        }
+        match session_store::save(path, &doc) {
+            Ok(()) => self.saved = Some(doc),
+            Err(error) => self.error = Some(error),
+        }
     }
 
     fn form(&mut self, ui: &mut egui::Ui) {
@@ -284,6 +391,43 @@ impl App {
         ui.weak(
             "Chaque session garde ses propres réglages. Le bouton démarre les annonces réseau.",
         );
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("Enregistrer…").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Sessions JSON", &["json"])
+                    .set_file_name("ratio-mini-sessions.json")
+                    .save_file()
+            {
+                match session_store::save(&path, &self.document()) {
+                    Ok(()) => {
+                        self.error = None;
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+            if ui
+                .add_enabled(
+                    !self.sessions.iter().any(|s| s.running),
+                    egui::Button::new("Charger…"),
+                )
+                .on_hover_text("Disponible lorsque toutes les sessions sont arrêtées")
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Sessions JSON", &["json"])
+                    .pick_file()
+            {
+                match session_store::load(&path) {
+                    Ok(Some(doc)) => {
+                        self.apply_document(doc);
+                        self.saved = None;
+                    }
+                    Ok(None) => self.error = Some("Fichier introuvable.".into()),
+                    Err(error) => self.error = Some(error),
+                }
+            }
+        });
+        ui.weak("Liste et réglages conservés à côté du programme. Les sessions restaurées restent arrêtées.");
         if let Some(error) = &self.error {
             ui.add_space(12.0);
             ui.colored_label(Color32::from_rgb(255, 145, 145), error);
@@ -330,6 +474,7 @@ impl App {
             });
         }
         let mut remove = None;
+        let mut restart = None;
         egui::ScrollArea::vertical().id_salt("sessions").show(ui, |ui| {
             for (index, session) in self.sessions.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
@@ -350,7 +495,10 @@ impl App {
                         ui.horizontal(|ui| {
                             if session.running {
                                 if ui.add_enabled(!session.stop.load(Ordering::SeqCst), egui::Button::new("Arrêter")).clicked() { session.request_stop(); }
-                            } else if ui.button("Retirer").clicked() { remove = Some(index); }
+                            } else {
+                                if ui.add_enabled(!self.closing, egui::Button::new("Démarrer")).clicked() { restart = Some(index); }
+                                if ui.button("Retirer").clicked() { remove = Some(index); }
+                            }
                             ui.collapsing("Journal", |ui| { for line in &session.logs { ui.small(line); } });
                         });
                     });
@@ -358,6 +506,10 @@ impl App {
                 });
             }
         });
+        if let Some(index) = restart {
+            let settings = self.sessions[index].settings.clone();
+            self.launch(settings, Some(index));
+        }
         if let Some(index) = remove {
             self.sessions.remove(index);
         }
@@ -400,12 +552,20 @@ impl eframe::App for App {
             ui.add_space(14.0);
             self.list(ui);
         });
+        if Instant::now() >= self.next_save
+            || self.closing
+            || ctx.input(|i| i.viewport().close_requested())
+        {
+            self.persist();
+            self.next_save = Instant::now() + Duration::from_secs(2);
+        }
         ctx.request_repaint_after(Duration::from_millis(200));
     }
 }
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.persist();
         for session in &self.sessions {
             session.stop.store(true, Ordering::SeqCst);
         }
@@ -428,7 +588,11 @@ fn main() -> eframe::Result {
             style.spacing.item_spacing = egui::vec2(9.0, 8.0);
             style.visuals.selection.bg_fill = Color32::from_rgb(36, 110, 95);
             cc.egui_ctx.set_style(style);
-            Ok(Box::<App>::default())
+            let app = match std::env::current_exe() {
+                Ok(exe) => App::restore(exe.with_file_name("ratio-mini-sessions.json")),
+                Err(_) => App::default(),
+            };
+            Ok(Box::new(app))
         }),
     )
 }
@@ -436,6 +600,55 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restored_list_never_starts_sessions_or_reads_torrent_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.json");
+        let (session, _tx) = fake_session("missing-file.torrent");
+        let mut original = App::default();
+        original.sessions.push(session);
+        session_store::save(&path, &original.document()).unwrap();
+        let restored = App::restore(path);
+        assert_eq!(restored.sessions.len(), 1);
+        assert!(!restored.sessions[0].running);
+        assert_eq!(restored.sessions[0].announced, 0);
+        assert_eq!(restored.sessions[0].status, "Prêt à démarrer");
+    }
+
+    #[test]
+    fn corrupt_autosave_is_not_overwritten_by_app_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sessions.json");
+        std::fs::write(&path, "{invalid").unwrap();
+        let app = App::restore(path.clone());
+        assert!(app.error.is_some());
+        drop(app);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "{invalid");
+    }
+
+    #[test]
+    fn paused_state_survives_started_log_and_stop_takes_priority() {
+        let (mut session, tx) = fake_session("empty-swarm");
+        tx.send(Message::Update(Event::Swarm {
+            seeders: Some(5),
+            leechers: Some(0),
+            paused: true,
+        }))
+        .unwrap();
+        tx.send(Message::Update(Event::Log("started accepté".into())))
+            .unwrap();
+        session.poll();
+        assert_eq!(session.status, "Pause : aucun leecher");
+        session.request_stop();
+        tx.send(Message::Update(Event::Swarm {
+            seeders: Some(5),
+            leechers: Some(2),
+            paused: false,
+        }))
+        .unwrap();
+        session.poll();
+        assert_eq!(session.status, "Arrêt en cours…");
+    }
 
     fn fake_session(name: &str) -> (Session, mpsc::Sender<Message>) {
         let (tx, receiver) = mpsc::channel();
