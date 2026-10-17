@@ -45,6 +45,9 @@ pub struct Args {
     /// Port annoncé (aucun port n'est ouvert par le programme)
     #[arg(long, default_value_t = 6881, value_parser = clap::value_parser!(u16).range(1..))]
     pub port: u16,
+    /// Continuer même si le tracker indique zéro leecher
+    #[arg(long)]
+    pub ignore_swarm: bool,
 }
 
 #[derive(Debug)]
@@ -283,6 +286,8 @@ fn announce_url(
 struct Reply {
     interval: u64,
     tracker_id: Option<Vec<u8>>,
+    seeders: Option<u64>,
+    leechers: Option<u64>,
 }
 fn announce(client: &Client, url: String) -> Result<Reply> {
     let response = client
@@ -303,7 +308,11 @@ fn announce(client: &Client, url: String) -> Result<Reply> {
     if bytes.len() > 1024 * 1024 {
         return Err("Réponse du tracker trop volumineuse".into());
     }
-    let root = parse(&bytes)?;
+    parse_reply(&bytes)
+}
+
+fn parse_reply(bytes: &[u8]) -> Result<Reply> {
+    let root = parse(bytes)?;
     if root.get(b"failure reason").is_some() {
         return Err(
             "Annonce refusée par le tracker (texte masqué car il peut contenir la passkey)".into(),
@@ -324,6 +333,8 @@ fn announce(client: &Client, url: String) -> Result<Reply> {
             .get(b"tracker id")
             .and_then(Node::bytes)
             .map(<[u8]>::to_vec),
+        seeders: root.get(b"complete").and_then(Node::number),
+        leechers: root.get(b"incomplete").and_then(Node::number),
     })
 }
 
@@ -365,12 +376,19 @@ impl Traffic {
         };
     }
 
+    #[cfg(test)]
     fn advance(&mut self, now: Duration) -> u64 {
+        self.advance_paused(now, false)
+    }
+
+    fn advance_paused(&mut self, now: Duration, paused: bool) -> u64 {
         let elapsed = ramp_weight(self.previous, now, self.ramp);
-        self.byte_nanos = self
-            .byte_nanos
-            .saturating_add(elapsed.saturating_mul(self.current_rate))
-            .min(u128::from(self.target) * 1_000_000_000);
+        if !paused {
+            self.byte_nanos = self
+                .byte_nanos
+                .saturating_add(elapsed.saturating_mul(self.current_rate))
+                .min(u128::from(self.target) * 1_000_000_000);
+        }
         self.previous = now;
         if now.saturating_sub(self.changed) >= Duration::from_secs(5) {
             self.resample();
@@ -400,6 +418,11 @@ fn ramp_weight(from: Duration, to: Duration, ramp: Duration) -> u128 {
 #[derive(Debug, Clone)]
 pub enum Event {
     Log(String),
+    Swarm {
+        seeders: Option<u64>,
+        leechers: Option<u64>,
+        paused: bool,
+    },
     Progress {
         simulated: u64,
         announced: u64,
@@ -470,6 +493,12 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         &client,
         announce_url(&t, &peer, args.port, 0, Some("started"), None),
     )?;
+    let mut paused = !args.ignore_swarm && reply.leechers == Some(0);
+    emit(Event::Swarm {
+        seeders: reply.seeders,
+        leechers: reply.leechers,
+        paused,
+    });
     let start = Instant::now();
     let mut traffic = Traffic::new(rate, args.variation_percent, target, args.ramp_seconds);
     let mut last = start;
@@ -480,7 +509,7 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         reply.interval
     );
     loop {
-        let amount = traffic.advance(start.elapsed());
+        let amount = traffic.advance_paused(start.elapsed(), paused);
         let stopping = stop.load(Ordering::SeqCst);
         if last_progress.elapsed() >= Duration::from_millis(500) {
             let ramp_factor = if args.ramp_seconds == 0 {
@@ -491,7 +520,11 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
             emit(Event::Progress {
                 simulated: amount,
                 announced,
-                rate_kib: traffic.current_rate as f64 / 1024.0 * ramp_factor,
+                rate_kib: if paused {
+                    0.0
+                } else {
+                    traffic.current_rate as f64 / 1024.0 * ramp_factor
+                },
             });
             last_progress = Instant::now();
         }
@@ -525,10 +558,31 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         if done {
             break;
         }
+        // Count time spent in the request under the previous state before applying new statistics.
+        traffic.advance_paused(start.elapsed(), paused);
+        let next_paused = !args.ignore_swarm && next.leechers == Some(0);
+        if next_paused != paused {
+            report!(
+                "{}",
+                if next_paused {
+                    "Upload suspendu : aucun leecher annoncé."
+                } else {
+                    "Reprise : de nouvelles statistiques ont été reçues."
+                }
+            );
+        }
+        paused = next_paused;
+        emit(Event::Swarm {
+            seeders: next.seeders,
+            leechers: next.leechers,
+            paused,
+        });
         let tracker_id = next.tracker_id.or(reply.tracker_id);
         reply = Reply {
             interval: next.interval,
             tracker_id,
+            seeders: next.seeders,
+            leechers: next.leechers,
         };
         last = Instant::now();
     }
@@ -538,6 +592,25 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn swarm_statistics_distinguish_missing_and_zero() {
+        let unknown = parse_reply(b"d8:intervali60e5:peers0:e").unwrap();
+        assert_eq!(unknown.leechers, None);
+        let empty =
+            parse_reply(b"d8:completei12e10:incompletei0e8:intervali60e5:peers0:e").unwrap();
+        assert_eq!((empty.seeders, empty.leechers), (Some(12), Some(0)));
+    }
+
+    #[test]
+    fn pause_does_not_accumulate_hidden_upload_or_catch_up() {
+        let mut traffic = Traffic::new(1000, 0, u64::MAX, 0);
+        assert_eq!(traffic.advance_paused(Duration::from_secs(5), false), 5000);
+        assert_eq!(traffic.advance_paused(Duration::from_secs(65), true), 5000);
+        assert_eq!(
+            traffic.advance_paused(Duration::from_secs(70), false),
+            10000
+        );
+    }
     #[test]
     fn concurrent_sessions_stop_independently_and_send_final_announces() {
         use std::{io::Write, net::TcpListener};
@@ -591,6 +664,7 @@ mod tests {
                         ramp_seconds: 30,
                         send: true,
                         port: 6881,
+                        ignore_swarm: false,
                     },
                     stop,
                     |event| {

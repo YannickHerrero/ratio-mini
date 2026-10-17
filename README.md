@@ -13,6 +13,8 @@ Double-cliquer sur **`ratio-mini-gui.exe`**. Aucune installation ni commande n'e
 
 La liste affiche le débit simulé, le volume calculé et le dernier volume accepté dans une réponse du tracker. Le journal contient les annonces et les erreurs. La barre progresse selon le volume simulé ; elle peut atteindre le plafond avant la prochaine annonce réseau. Une réponse acceptée ne garantit pas que le site créditera le ratio.
 
+Les nombres de seeders et de leechers sont affichés quand le tracker les fournit (`?` sinon). Par défaut, le compteur d'upload est suspendu si une réponse annonce zéro leecher. Les annonces continuent à l'intervalle habituel pour recevoir de nouvelles statistiques ; la reprise n'ajoute pas de volume pour le temps passé en pause. La case **Pause si aucun leecher** permet de régler ce comportement pour chaque nouvel ajout. En ligne de commande, `--ignore-swarm` désactive cette pause.
+
 **Arrêter** demande une annonce finale pour une session ; **Tout arrêter** agit sur toutes. **Retirer** et **Nettoyer la liste** enlèvent uniquement des sessions inactives. Les doublons actifs sont reconnus par le hash du torrent, même si le fichier porte un autre nom. Après un arrêt ou une erreur, un torrent peut être ajouté à nouveau.
 
 Fermer la fenêtre demande d'abord l'arrêt des sessions. La fenêtre reste ouverte jusqu'à la fin des requêtes, dont le délai maximal est de 20 secondes chacune. La liste et les réglages ne sont pas conservés après fermeture ; les torrents ne sont pas relancés automatiquement. Aucun tracker n'est contacté au simple démarrage de l'application.
@@ -77,7 +79,7 @@ Référence du protocole : [spécification officielle BitTorrent, BEP 3](https:/
 
 ## Lecture comparative de RatioMaster.NET
 
-Code examiné le 17 octobre 2026, au commit [`10d28c4`](https://github.com/NikolayIT/RatioMaster.NET/tree/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217). Cette comparaison décrit le code ; elle ne constitue pas un essai sur un tracker ni une preuve d'indétectabilité. Les fonctionnalités ci-dessous n'ont pas été intégrées à Ratio Mini à la suite de cette lecture.
+Code examiné le 17 octobre 2026, au commit [`10d28c4`](https://github.com/NikolayIT/RatioMaster.NET/tree/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217). Cette comparaison décrit le code ; elle ne constitue pas un essai sur un tracker ni une preuve d'indétectabilité. Le tableau décrit les écarts relevés pendant la lecture initiale. Les statistiques du groupe et la pause sur zéro leecher ont depuis été intégrées à notre moteur et à l'interface.
 
 | Élément observé | Comparaison et intérêt |
 | --- | --- |

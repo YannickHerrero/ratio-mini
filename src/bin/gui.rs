@@ -32,6 +32,9 @@ struct Session {
     speed: f64,
     logs: VecDeque<String>,
     failed: bool,
+    paused: bool,
+    seeders: Option<u64>,
+    leechers: Option<u64>,
 }
 
 impl Session {
@@ -46,7 +49,10 @@ impl Session {
         while self.running {
             match self.receiver.try_recv() {
                 Ok(Message::Update(Event::Log(line))) => {
-                    if line.starts_with("started accepté") && !self.stop.load(Ordering::SeqCst) {
+                    if line.starts_with("started accepté")
+                        && !self.paused
+                        && !self.stop.load(Ordering::SeqCst)
+                    {
                         self.status = "En cours".into();
                     }
                     if self.logs.len() >= 60 {
@@ -62,6 +68,23 @@ impl Session {
                     self.simulated = simulated;
                     self.announced = announced;
                     self.speed = rate_kib;
+                }
+                Ok(Message::Update(Event::Swarm {
+                    seeders,
+                    leechers,
+                    paused,
+                })) => {
+                    self.seeders = seeders;
+                    self.leechers = leechers;
+                    self.paused = paused;
+                    if !self.stop.load(Ordering::SeqCst) {
+                        self.status = if paused {
+                            "Pause : aucun leecher"
+                        } else {
+                            "En cours"
+                        }
+                        .into();
+                    }
                 }
                 Ok(Message::Finished(result)) => {
                     self.running = false;
@@ -95,6 +118,7 @@ struct App {
     target: u64,
     variation: u8,
     ramp: u16,
+    pause_without_leechers: bool,
     sessions: Vec<Session>,
     error: Option<String>,
     closing: bool,
@@ -108,6 +132,7 @@ impl Default for App {
             target: 1024,
             variation: 25,
             ramp: 30,
+            pause_without_leechers: true,
             sessions: Vec::new(),
             error: None,
             closing: false,
@@ -139,6 +164,7 @@ impl App {
             ramp_seconds: self.ramp.min(3600),
             send: true,
             port: 6881,
+            ignore_swarm: !self.pause_without_leechers,
         };
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, receiver) = mpsc::channel();
@@ -174,6 +200,9 @@ impl App {
             speed: 0.0,
             logs: VecDeque::new(),
             failed: false,
+            paused: false,
+            seeders: None,
+            leechers: None,
         });
         self.file = None;
         self.error = None;
@@ -233,6 +262,7 @@ impl App {
                 .range(0..=3600)
                 .suffix(" s"),
         );
+        ui.checkbox(&mut self.pause_without_leechers, "Pause si aucun leecher");
         ui.add_space(18.0);
         if ui
             .add_enabled(
@@ -309,6 +339,8 @@ impl App {
                         ui.add(egui::ProgressBar::new((session.simulated as f64 / target).clamp(0.0, 1.0) as f32).text(format!("{:.1} / {} Mio simulés", session.simulated as f64 / 1_048_576.0, session.settings.upload_mib)));
                         ui.label(format!("{:.0} Kio/s actuellement  ·  moyenne visée {} Kio/s  ·  variation ±{} %", session.speed, session.settings.rate_kib, session.settings.variation_percent));
                         ui.weak(format!("Dernière déclaration acceptée : {:.1} Mio", session.announced as f64 / 1_048_576.0));
+                        let count = |value: Option<u64>| value.map_or_else(|| "?".into(), |n| n.to_string());
+                        ui.weak(format!("Seeders : {}  ·  Leechers : {}", count(session.seeders), count(session.leechers)));
                         ui.horizontal(|ui| {
                             if session.running {
                                 if ui.add_enabled(!session.stop.load(Ordering::SeqCst), egui::Button::new("Arrêter")).clicked() { session.request_stop(); }
@@ -413,6 +445,7 @@ mod tests {
                     ramp_seconds: 30,
                     send: true,
                     port: 6881,
+                    ignore_swarm: false,
                 },
                 stop: Arc::new(AtomicBool::new(false)),
                 receiver,
@@ -423,6 +456,9 @@ mod tests {
                 speed: 0.0,
                 logs: VecDeque::new(),
                 failed: false,
+                paused: false,
+                seeders: None,
+                leechers: None,
             },
             tx,
         )
