@@ -630,13 +630,24 @@ impl App {
         egui::ScrollArea::vertical().id_salt("sessions").show(ui, |ui| {
             for (index, session) in self.sessions.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                    egui::Frame::group(ui.style()).inner_margin(egui::Margin::symmetric(6, 3)).show(ui, |ui| {
                         ui.set_min_width((ui.available_width() - 2.0).max(0.0));
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(&session.name).strong());
-                            let color = if session.failed { Color32::from_rgb(255, 145, 145) } else if session.running { Color32::from_rgb(100, 215, 175) } else { Color32::LIGHT_GRAY };
-                            ui.colored_label(color, &session.status);
+                        let id = ui.make_persistent_id(("session-details", &session.settings.torrent));
+                        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+                        let header = ui.horizontal(|ui| {
+                            state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(format!("{:.0} Kio/s", session.speed));
+                                let color = if session.failed { Color32::from_rgb(255, 145, 145) } else if session.running { Color32::from_rgb(100, 215, 175) } else { Color32::LIGHT_GRAY };
+                                ui.add(egui::Label::new(RichText::new(&session.status).color(color)).truncate());
+                                ui.add_sized([ui.available_width(), ui.spacing().interact_size.y], egui::Label::new(RichText::new(&session.name).strong()).halign(egui::Align::Min).truncate())
+                                    .on_hover_text(&session.name);
+                            });
                         });
+                        if header.response.interact(egui::Sense::click()).on_hover_text("Afficher ou replier les détails").clicked() {
+                            state.toggle(ui);
+                        }
+                        state.show_body_unindented(ui, |ui| {
                         ui.weak(session.settings.client_profile.label());
                         ui.add_space(6.0);
                         let limit_label = match (session.settings.upload_mib, session.settings.upload_percent) {
@@ -666,8 +677,9 @@ impl App {
                             }
                             ui.collapsing("Journal", |ui| { for line in &session.logs { ui.small(line); } });
                         });
+                        });
                     });
-                    ui.add_space(10.0);
+                    ui.add_space(4.0);
                 });
             }
         });
