@@ -74,3 +74,21 @@ cargo build --release --locked --features gui --bins
 Les exécutables compilés se trouvent dans `target\release\ratio-mini.exe` et `target\release\ratio-mini-gui.exe`. Ceux livrés à la racine sont des copies de cette compilation. Les tests vérifient notamment deux sessions concurrentes et leur arrêt indépendant avec un faux tracker local, ainsi que les états de l'interface. Aucune validation sur ton compte ou ton tracker n'a été effectuée.
 
 Référence du protocole : [spécification officielle BitTorrent, BEP 3](https://www.bittorrent.org/beps/bep_0003.html).
+
+## Lecture comparative de RatioMaster.NET
+
+Code examiné le 17 octobre 2026, au commit [`10d28c4`](https://github.com/NikolayIT/RatioMaster.NET/tree/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217). Cette comparaison décrit le code ; elle ne constitue pas un essai sur un tracker ni une preuve d'indétectabilité. Les fonctionnalités ci-dessous n'ont pas été intégrées à Ratio Mini à la suite de cette lecture.
+
+| Élément observé | Comparaison et intérêt |
+| --- | --- |
+| [Profils de clients](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core/Clients/ClientProfile.cs) | Le profil couvre HTTP, en-têtes, encodage et identité. Changer uniquement le User-Agent de notre client ne reproduirait pas cet ensemble. |
+| [Gestion des sessions](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core/Sessions/TorrentSession.cs) | L'upload peut être suspendu lorsque le tracker indique zéro leecher. Le moteur prévoit des nouvelles tentatives et des conditions d'arrêt. Ratio Mini respecte déjà les intervalles mais s'arrête sur une erreur réseau et ne lit pas les statistiques du groupe. |
+| [Variations de débit](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core/Sessions/TorrentSession.cs) | Leur jitter s'ajoute au débit de base ; il n'est donc pas forcément centré sur la moyenne demandée. Notre modèle centré, lissé et progressif correspond mieux à une moyenne visée, sans garantie sur la moyenne d'une session courte. |
+| [Réponse aux connexions](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core/Networking/PeerListener.cs) | Le listener répond à un handshake puis ferme la connexion. Cela n'implémente pas le transfert de pièces et ne démontre pas un partage effectif. Ratio Mini n'ouvre aucun port. |
+| [Lecture mémoire](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core/MemoryScan/ClientValueScanner.cs) | Récupère des valeurs d'identité dans un client lancé. Cette capacité élargirait sensiblement les accès locaux de notre petite application ; elle n'est pas nécessaire à sa robustesse. |
+| [Tests des requêtes](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core.Tests/Tracker/RequestGoldenTests.cs) | Les tests figent les octets attendus par leurs profils. C'est une bonne protection contre les régressions, mais pas une validation des contrôles d'un site réel. |
+| [Sauvegarde des sessions](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core/Sessions/SessionFile.cs) | Écriture temporaire puis remplacement du fichier. C'est une approche utile pour ajouter plus tard une persistance fiable de notre liste et de ses réglages. |
+
+Les améliorations de fiabilité à prioriser seraient la sauvegarde de la liste sans relance automatique, la modification des réglages d'une session et une gestion explicite des erreurs temporaires. Les statistiques du tracker peuvent aussi être affichées, en distinguant une valeur absente d'une valeur zéro. Elles ne constituent pas une mesure complète des transferts réels.
+
+Le dépôt amont est sous licence MIT ; toute reprise substantielle de son code doit conserver ses mentions de licence. La présente version utilise une implémentation Rust propre et n'incorpore pas de code provenant de ce dépôt.
