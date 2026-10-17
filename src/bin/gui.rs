@@ -153,6 +153,7 @@ struct App {
     variation: u8,
     ramp: u16,
     pause_without_leechers: bool,
+    client_profile: ratio_mini::profiles::ClientProfile,
     sessions: Vec<Session>,
     error: Option<String>,
     closing: bool,
@@ -170,6 +171,7 @@ impl Default for App {
             variation: 25,
             ramp: 30,
             pause_without_leechers: true,
+            client_profile: ratio_mini::profiles::ClientProfile::Native,
             sessions: Vec::new(),
             error: None,
             closing: false,
@@ -194,6 +196,7 @@ impl App {
             send: true,
             port: 6881,
             ignore_swarm: !self.pause_without_leechers,
+            client_profile: self.client_profile,
         };
         if self.launch(settings, None) {
             self.file = None;
@@ -274,6 +277,7 @@ impl App {
                 variation: self.variation,
                 ramp: self.ramp,
                 pause_without_leechers: self.pause_without_leechers,
+                client_profile: self.client_profile,
             },
             torrents: self.sessions.iter().map(|s| s.settings.clone()).collect(),
         }
@@ -285,6 +289,7 @@ impl App {
         self.variation = doc.defaults.variation;
         self.ramp = doc.defaults.ramp;
         self.pause_without_leechers = doc.defaults.pause_without_leechers;
+        self.client_profile = doc.defaults.client_profile;
         self.sessions = doc.torrents.iter().cloned().map(Session::idle).collect();
         self.saved = Some(doc);
         self.error = None;
@@ -347,6 +352,18 @@ impl App {
             ui.weak("Aucun fichier sélectionné");
         }
         ui.add_space(18.0);
+        ui.label("Profil du client");
+        egui::ComboBox::from_id_salt("profile")
+            .selected_text(self.client_profile.label())
+            .show_ui(ui, |ui| {
+                for profile in ratio_mini::profiles::ClientProfile::ALL {
+                    ui.selectable_value(&mut self.client_profile, profile, profile.label());
+                }
+            });
+        if self.client_profile != ratio_mini::profiles::ClientProfile::Native {
+            ui.weak("Profil : connexion directe HTTP(S).");
+        }
+        ui.add_space(8.0);
         ui.label("Vitesse moyenne visée");
         ui.add(
             egui::DragValue::new(&mut self.rate)
@@ -485,6 +502,7 @@ impl App {
                             let color = if session.failed { Color32::from_rgb(255, 145, 145) } else if session.running { Color32::from_rgb(100, 215, 175) } else { Color32::LIGHT_GRAY };
                             ui.colored_label(color, &session.status);
                         });
+                        ui.weak(session.settings.client_profile.label());
                         ui.add_space(6.0);
                         let target = session.settings.upload_mib as f64 * 1_048_576.0;
                         ui.add(egui::ProgressBar::new((session.simulated as f64 / target).clamp(0.0, 1.0) as f32).text(format!("{:.1} / {} Mio simulés", session.simulated as f64 / 1_048_576.0, session.settings.upload_mib)));
@@ -665,6 +683,7 @@ mod tests {
                     send: true,
                     port: 6881,
                     ignore_swarm: false,
+                    client_profile: ratio_mini::profiles::ClientProfile::Native,
                 },
                 stop: Arc::new(AtomicBool::new(false)),
                 receiver,

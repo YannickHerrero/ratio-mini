@@ -14,6 +14,8 @@ pub struct FormSettings {
     pub variation: u8,
     pub ramp: u16,
     pub pause_without_leechers: bool,
+    #[serde(default)]
+    pub client_profile: crate::profiles::ClientProfile,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,6 +107,7 @@ mod tests {
                 variation: 25,
                 ramp: 30,
                 pause_without_leechers: true,
+                client_profile: crate::profiles::ClientProfile::Native,
             },
             torrents: vec![Args {
                 torrent: "chemin avec espaces/été.torrent".into(),
@@ -115,6 +118,7 @@ mod tests {
                 send: true,
                 port: 6881,
                 ignore_swarm: false,
+                client_profile: crate::profiles::ClientProfile::Native,
             }],
         }
     }
@@ -143,5 +147,27 @@ mod tests {
         std::fs::write(&path, b"{broken").unwrap();
         assert!(load(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    }
+
+    #[test]
+    fn old_session_files_default_to_native_profile() {
+        let mut value = serde_json::to_value(document()).unwrap();
+        value["defaults"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_profile");
+        value["torrents"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_profile");
+        let loaded: Document = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            loaded.defaults.client_profile,
+            crate::profiles::ClientProfile::Native
+        );
+        assert_eq!(
+            loaded.torrents[0].client_profile,
+            crate::profiles::ClientProfile::Native
+        );
     }
 }

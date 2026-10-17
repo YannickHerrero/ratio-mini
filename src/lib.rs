@@ -1,5 +1,5 @@
 use clap::Parser;
-use rand::{Rng, RngCore};
+use rand::Rng;
 use reqwest::{Url, blocking::Client, redirect::Policy};
 use sha1::{Digest, Sha1};
 use std::{
@@ -17,6 +17,8 @@ use std::{
 
 pub type Result<T> = std::result::Result<T, String>;
 const MAX_BYTES: u64 = 16 * 1024 * 1024;
+mod profile_transport;
+pub mod profiles;
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +50,10 @@ pub struct Args {
     /// Continuer même si le tracker indique zéro leecher
     #[arg(long)]
     pub ignore_swarm: bool,
+    /// Profil d'annonce du client (les profils utilisent une connexion directe)
+    #[arg(long, value_enum, default_value_t = profiles::ClientProfile::Native)]
+    #[serde(default)]
+    pub client_profile: profiles::ClientProfile,
 }
 
 #[cfg(feature = "gui")]
@@ -364,6 +370,29 @@ fn announce(client: &Client, url: String) -> std::result::Result<Reply, Announce
     parse_reply(&bytes).map_err(AnnounceError::Rejected)
 }
 
+fn announce_profile(
+    client: &Client,
+    profile: profiles::ClientProfile,
+    url: String,
+) -> std::result::Result<Reply, AnnounceError> {
+    if profile == profiles::ClientProfile::Native {
+        return announce(client, url);
+    }
+    let response = profile_transport::get(profile, &url)?;
+    if !(200..300).contains(&response.status) {
+        let message = format!("Le tracker a renvoyé HTTP {}", response.status);
+        return Err(if response.status == 429 || response.status >= 500 {
+            AnnounceError::Temporary {
+                message,
+                retry_after: response.retry_after,
+            }
+        } else {
+            AnnounceError::Rejected(message)
+        });
+    }
+    parse_reply(&response.body).map_err(AnnounceError::Rejected)
+}
+
 fn retry_request(
     mut request: impl FnMut() -> std::result::Result<Reply, AnnounceError>,
     mut wait: impl FnMut(Duration) -> bool,
@@ -593,11 +622,28 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
         .user_agent(concat!("ratio-mini/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|_| "Initialisation HTTP impossible")?;
-    let mut peer = *b"-RM0003-000000000000";
-    rand::thread_rng().fill_bytes(&mut peer[8..]);
-    let start_url = announce_url(&t, &peer, args.port, 0, Some("started"), None);
+    let identity = profiles::Identity::new(args.client_profile);
+    let peer = identity.peer;
+    report!("Profil : {}", args.client_profile.label());
+    let make_url = |amount, event, tracker_id: Option<&[u8]>| {
+        identity
+            .url(
+                t.tracker.as_str(),
+                &profiles::Values {
+                    hash: &t.hash,
+                    port: args.port,
+                    uploaded: amount,
+                    downloaded: 0,
+                    left: 0,
+                    event,
+                    tracker_id,
+                },
+            )
+            .unwrap_or_else(|| announce_url(&t, &peer, args.port, amount, event, tracker_id))
+    };
+    let start_url = make_url(0, Some("started"), None);
     let Some(mut reply) = retry_request(
-        || announce(&client, start_url.clone()),
+        || announce_profile(&client, args.client_profile, start_url.clone()),
         |delay| wait_until_retry(&stop, delay),
         &emit,
     )?
@@ -644,19 +690,17 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
             continue;
         }
         let mut done = stopping || amount == target;
-        let url = announce_url(
-            &t,
-            &peer,
-            args.port,
+        let url = make_url(
             amount,
             if done { Some("stopped") } else { None },
             reply.tracker_id.as_deref(),
         );
         let mut next = if done {
-            announce(&client, url).map_err(|error| error.message().to_owned())?
+            announce_profile(&client, args.client_profile, url)
+                .map_err(|error| error.message().to_owned())?
         } else {
             match retry_request(
-                || announce(&client, url.clone()),
+                || announce_profile(&client, args.client_profile, url.clone()),
                 |delay| wait_until_retry(&stop, delay),
                 &emit,
             )? {
@@ -664,16 +708,10 @@ pub fn run_session(args: Args, stop: Arc<AtomicBool>, emit: impl Fn(Event)) -> R
                 None => {
                     done = true;
                     amount = traffic.advance_paused(start.elapsed(), paused);
-                    announce(
+                    announce_profile(
                         &client,
-                        announce_url(
-                            &t,
-                            &peer,
-                            args.port,
-                            amount,
-                            Some("stopped"),
-                            reply.tracker_id.as_deref(),
-                        ),
+                        args.client_profile,
+                        make_url(amount, Some("stopped"), reply.tracker_id.as_deref()),
                     )
                     .map_err(|error| error.message().to_owned())?
                 }
@@ -898,6 +936,7 @@ mod tests {
                         send: true,
                         port: 6881,
                         ignore_swarm: false,
+                        client_profile: profiles::ClientProfile::Native,
                     },
                     stop,
                     |event| {

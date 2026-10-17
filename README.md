@@ -11,6 +11,8 @@ Double-cliquer sur **`ratio-mini-gui.exe`**. Aucune installation ni commande n'e
 3. Cliquer sur **Ajouter et démarrer** : les annonces réseau commencent et la session apparaît à droite.
 4. Recommencer pour ajouter d'autres torrents. Chaque session fonctionne en parallèle avec ses propres réglages ; les vitesses s'additionnent.
 
+Le menu **Profil du client** propose Ratio Mini, qBittorrent 5.2.4 / 5.2.3 / 5.1.4 / 4.6.7 et Transmission 2.94 / 3.00. Le profil choisi est conservé avec chaque torrent. Les anciennes sauvegardes utilisent Ratio Mini. Les six profils repris du dépôt RatioMaster.NET déterminent l'identifiant, la clé de session, l'encodage de la query string et les en-têtes HTTP dans leur ordre exact. Les identifiants restent stables pendant une session. Ces profils utilisent une connexion directe : ils ne reprennent pas la configuration proxy de reqwest. Ils ne reproduisent pas l'empreinte TLS, le système d'exploitation ni le comportement complet d'un client réel.
+
 La liste affiche le débit simulé, le volume calculé et le dernier volume accepté dans une réponse du tracker. Le journal contient les annonces et les erreurs. La barre progresse selon le volume simulé ; elle peut atteindre le plafond avant la prochaine annonce réseau. Une réponse acceptée ne garantit pas que le site créditera le ratio.
 
 Les nombres de seeders et de leechers sont affichés quand le tracker les fournit (`?` sinon). Par défaut, le compteur d'upload est suspendu si une réponse annonce zéro leecher. Les annonces continuent à l'intervalle habituel pour recevoir de nouvelles statistiques ; la reprise n'ajoute pas de volume pour le temps passé en pause. Une réponse sans statistiques conserve les derniers chiffres connus ; elle ne transforme pas un zéro connu en reprise. La case **Pause si aucun leecher** permet de régler ce comportement pour chaque nouvel ajout. En ligne de commande, `--ignore-swarm` désactive cette pause.
@@ -43,6 +45,7 @@ Démarrer les annonces :
 - `--upload-mib` : plafond pour cette session en Mio, 1024 par défaut.
 - `--port` : port déclaré, 6881 par défaut. Le programme n'ouvre pas ce port.
 - `--send` : active les requêtes réseau. Sans cette option, seul un aperçu local est affiché.
+- `--client-profile` : `native` (défaut), `qbittorrent524`, `qbittorrent523`, `qbittorrent514`, `qbittorrent467`, `transmission294` ou `transmission300`.
 - `--help` : affiche les options.
 - **Ctrl+C** : demande une dernière annonce `stopped`, puis quitte. Une requête en cours peut prendre jusqu'à 20 secondes avant de se terminer.
 
@@ -63,9 +66,9 @@ Le programme annonce `started` avec zéro octet, puis augmente `uploaded` selon 
 
 Les erreurs réseau, les réponses HTTP 429 et les erreurs HTTP 5xx déclenchent au plus trois nouvelles tentatives, après 60, 120 puis 240 secondes. Une valeur `Retry-After` exprimée en secondes peut prolonger ce délai. Une attente demandée supérieure à 24 heures arrête la session. Les refus explicites, les autres erreurs HTTP et les réponses invalides arrêtent immédiatement la session. L'attente peut être interrompue par **Arrêter** ; la requête finale `stopped` n'est pas relancée afin de ne pas prolonger indéfiniment la fermeture.
 
-Il utilise uniquement le champ `announce` du fichier : HTTP et HTTPS, torrents v1 ou hybrides. Pas d'UDP, de torrent v2 seul, de lien magnet, de sélection parmi plusieurs trackers, ni d'imitation d'un autre client. Son identité est `ratio-mini/0.3.0` avec un peer ID propre. Aucun débit ni variation ne garantit l'indétectabilité, l'acceptation des compteurs ou la hausse effective du ratio : cela dépend du tracker.
+Il utilise uniquement le champ `announce` du fichier : HTTP et HTTPS, torrents v1 ou hybrides. Pas d'UDP, de torrent v2 seul, de lien magnet ou de sélection parmi plusieurs trackers. Le profil natif utilise l'identité Ratio Mini ; les autres profils utilisent les valeurs définies dans leur catalogue. Aucun profil, débit ou variation ne garantit l'indétectabilité, l'acceptation des compteurs ou la hausse effective du ratio : cela dépend du tracker.
 
-Le tracker reçoit l'IP utilisée pour la connexion, l'identifiant du torrent, le peer ID, le port et les compteurs. La passkey présente dans l'URL du `.torrent` lui est transmise. Le programme masque le chemin, la query string et le texte des erreurs du tracker dans la console. Il n'a ni télémétrie, ni mise à jour automatique, ni autre service distant. Les redirections HTTP sont refusées ; HTTPS vérifie les certificats. HTTP reste non chiffré. La configuration proxy reconnue par reqwest peut s'appliquer aux connexions.
+Le tracker reçoit l'IP utilisée pour la connexion, l'identifiant du torrent, le peer ID, le port et les compteurs. La passkey présente dans l'URL du `.torrent` lui est transmise. Le programme masque le chemin, la query string et le texte des erreurs du tracker dans la console. Il n'a ni télémétrie, ni mise à jour automatique, ni autre service distant. Les redirections HTTP sont refusées ; HTTPS vérifie les certificats. HTTP reste non chiffré. La configuration proxy reconnue par reqwest peut s'appliquer au profil natif ; les profils émulés utilisent le transport direct de `src/profile_transport.rs`. Celui-ci gère Content-Length, chunked, gzip et deflate, avec des limites sur les en-têtes et le corps de réponse.
 
 ## Sources et compilation
 
@@ -97,6 +100,6 @@ Code examiné le 17 octobre 2026, au commit [`10d28c4`](https://github.com/Nikol
 | [Tests des requêtes](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core.Tests/Tracker/RequestGoldenTests.cs) | Les tests figent les octets attendus par leurs profils. C'est une bonne protection contre les régressions, mais pas une validation des contrôles d'un site réel. |
 | [Sauvegarde des sessions](https://github.com/NikolayIT/RatioMaster.NET/blob/10d28c4ebb51b4ca4ef68136e777b8bf00e5d217/src/RatioMaster.Core/Sessions/SessionFile.cs) | Écriture temporaire puis remplacement du fichier. C'est une approche utile pour ajouter plus tard une persistance fiable de notre liste et de ses réglages. |
 
-Les statistiques du tracker sont affichées en distinguant une valeur absente d'une valeur zéro. Elles ne constituent pas une mesure complète des transferts réels. Les variations restent centrées sur la moyenne visée. Notre implémentation conserve sa propre identité et n'intègre ni imitation de clients tiers, ni lecture mémoire d'autres logiciels, ni listener de handshake.
+Les statistiques du tracker sont affichées en distinguant une valeur absente d'une valeur zéro. Elles ne constituent pas une mesure complète des transferts réels. Les variations restent centrées sur la moyenne visée. Les six profils qBittorrent et Transmission sont désormais intégrés ; la lecture mémoire d'autres logiciels n'est pas utilisée.
 
-Le dépôt amont est sous licence MIT ; toute reprise substantielle de son code doit conserver ses mentions de licence. La présente version utilise une implémentation Rust propre et n'incorpore pas de code provenant de ce dépôt.
+Les données `src/client_profiles.json`, les requêtes de référence de `tests/fixtures/upstream-requests.txt` et les générateurs adaptés dans `src/profiles.rs` proviennent de RatioMaster.NET, commit `10d28c4ebb51b4ca4ef68136e777b8bf00e5d217`. Leur licence MIT et le copyright de Nikolay Kostov sont conservés dans `third-party/RatioMaster.NET-LICENSE.txt`. Les tests comparent les octets des quatre événements de chaque profil aux références amont ; ils ne prouvent pas qu'un site réel accepte ces profils.
